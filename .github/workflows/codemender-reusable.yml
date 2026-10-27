@@ -1,0 +1,380 @@
+name: CodeMender Enterprise Reusable Workflow
+
+# =============================================================================
+# Google Cloud CodeMender — Enterprise Reusable Workflow (workflow_call)
+# =============================================================================
+# Centralizes CodeMender CLI execution so 100+ application repositories can
+# inherit a single, standardized, centrally governed DevSecOps pipeline.
+#
+# Key Enterprise Capabilities:
+#   1. 100% Stateless Runner: No SQLite (`state.db`) synchronization across runs;
+#      vulnerability lifecycle & deduplication are managed via SARIF v2.1.0 in
+#      GitHub Code Scanning / ASPM and automated Pull Requests.
+#   2. Zero external script dependencies (100% self-contained bash + jq).
+#   3. Supports both Asynchronous Deep Audits (`deep`) and PR Gates (`diff`).
+#   4. Keyless OIDC authentication via GCP Workload Identity Federation (WIF).
+#   5. Protects WIF credentials from `git clean -fd` during `cm fix`.
+#   6. Creates atomic Git commits (1 commit per remediated vulnerability) and
+#      opens/updates an automated Pull Request for developer review.
+#   7. Optional append-only FinOps/audit export (`stats.json` & `sarif`) to GCS.
+# =============================================================================
+
+on:
+  workflow_call:
+    inputs:
+      gcp_project_id:
+        description: 'GCP Project ID where Vertex AI / CodeMender API is enabled'
+        required: true
+        type: string
+      gcp_wif_provider:
+        description: 'Full Workload Identity Provider resource name (projects/.../providers/...)'
+        required: true
+        type: string
+      gcp_sa_email:
+        description: 'Service Account email to impersonate via WIF'
+        required: true
+        type: string
+      gcp_telemetry_bucket:
+        description: 'Optional GCS bucket name (without gs://) for append-only FinOps token telemetry and SARIF archiving'
+        required: false
+        default: ''
+        type: string
+      scan_path:
+        description: 'Directory path to scan relative to repository root'
+        required: false
+        default: '.'
+        type: string
+      scan_mode:
+        description: 'Scan mode: "deep" (full repo audit), "diff" (PR delta + 1-hop callers), or "quick"'
+        required: false
+        default: 'deep'
+        type: string
+      cm_model:
+        description: 'Optional Gemini model override (leave empty for CLI default)'
+        required: false
+        default: ''
+        type: string
+      cm_context:
+        description: 'Optional architectural/threat-model context passed to cm find (-c)'
+        required: false
+        default: ''
+        type: string
+      enable_autofix:
+        description: 'Run cm fix on open findings and open an automated remediation Pull Request'
+        required: false
+        default: true
+        type: boolean
+      fix_severities:
+        description: 'Comma-separated severities eligible for auto-remediation (e.g., CRITICAL,HIGH)'
+        required: false
+        default: 'CRITICAL,HIGH'
+        type: string
+      fix_limit:
+        description: 'Maximum number of findings to auto-remediate in a single run'
+        required: false
+        default: '5'
+        type: string
+      enforce_gate:
+        description: 'Fail the workflow job (exit 1) if open target findings remain'
+        required: false
+        default: false
+        type: boolean
+      upload_sarif:
+        description: 'Upload SARIF v2.1.0 report to GitHub Code Scanning'
+        required: false
+        default: true
+        type: boolean
+      cm_version:
+        description: 'CodeMender CLI version in Artifact Registry (default: stable)'
+        required: false
+        default: 'stable'
+        type: string
+    secrets:
+      wif_audience:
+        description: 'Optional custom OIDC audience string if required by the WIF provider'
+        required: false
+
+jobs:
+  codemender-secops:
+    name: CodeMender (${{ inputs.scan_mode }} scan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    # Prevent concurrent runs on the same repository/mode from colliding on PR branches
+    concurrency:
+      group: codemender-${{ github.repository }}-${{ inputs.scan_mode }}-${{ github.ref_name }}
+      cancel-in-progress: ${{ inputs.scan_mode == 'diff' }}
+
+    permissions:
+      contents: write          # Required to push remediation branch when enable_autofix is true
+      pull-requests: write     # Required to open/update remediation Pull Request
+      id-token: write          # Required for GCP Workload Identity Federation OIDC token
+      security-events: write   # Required to upload SARIF to GitHub Code Scanning
+      actions: read            # Required by github/codeql-action/upload-sarif in private repos
+
+    env:
+      CLOUD_ML_PROJECT_ID: ${{ inputs.gcp_project_id }}
+      GOOGLE_CLOUD_PROJECT: ${{ inputs.gcp_project_id }}
+      CM_LOCATION: global
+      SCAN_PATH: ${{ inputs.scan_path }}
+      SCAN_MODE: ${{ inputs.scan_mode }}
+      CM_MODEL: ${{ inputs.cm_model }}
+      CM_CONTEXT: ${{ inputs.cm_context }}
+      ENABLE_AUTOFIX: ${{ inputs.enable_autofix }}
+      FIX_SEVERITIES: ${{ inputs.fix_severities }}
+      FIX_LIMIT: ${{ inputs.fix_limit }}
+      ENFORCE_GATE: ${{ inputs.enforce_gate }}
+      UPLOAD_SARIF: ${{ inputs.upload_sarif }}
+      GCS_TELEMETRY_BUCKET: ${{ inputs.gcp_telemetry_bucket }}
+      CM_VERSION: ${{ inputs.cm_version }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate Required Inputs
+        run: |
+          set -euo pipefail
+          MISSING=""
+          [ -n "${{ inputs.gcp_project_id }}" ]   || MISSING="$MISSING gcp_project_id"
+          [ -n "${{ inputs.gcp_wif_provider }}" ] || MISSING="$MISSING gcp_wif_provider"
+          [ -n "${{ inputs.gcp_sa_email }}" ]     || MISSING="$MISSING gcp_sa_email"
+          if [ -n "$MISSING" ]; then
+            echo "::error title=Missing Required Inputs::The following inputs were empty:$MISSING. Check your Organization or Repository Variables."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ inputs.gcp_project_id }}
+          workload_identity_provider: ${{ inputs.gcp_wif_provider }}
+          service_account: ${{ inputs.gcp_sa_email }}
+          audience: ${{ secrets.wif_audience }}
+
+      - name: Download & Install CodeMender CLI
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cmbin"
+          echo "Downloading CodeMender CLI (version: $CM_VERSION) from Artifact Registry..."
+          gcloud artifacts generic download \
+            --project=cmoc-prod \
+            --location=us \
+            --repository=codemender-cli-production \
+            --package=cm \
+            --version="$CM_VERSION" \
+            --name=cm-linux-amd64.zip \
+            --destination="$RUNNER_TEMP"
+          unzip -qo "$RUNNER_TEMP/cm-linux-amd64.zip" -d "$RUNNER_TEMP/cmbin"
+          chmod +x "$RUNNER_TEMP/cmbin/cm"
+          echo "$RUNNER_TEMP/cmbin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/cmbin/cm" --version
+
+      - name: Initialize Stateless CodeMender Workspace
+        run: |
+          set -euo pipefail
+          # CRITICAL: Exclude WIF credentials and local CodeMender folders from `git clean -fd`,
+          # which CodeMender runs internally before starting `cm find` and `cm fix` sessions.
+          printf '%s\n' '.cm_project' '.exploit' 'gha-creds-*.json' >> .git/info/exclude
+
+          cm init
+          mkdir -p ~/.codemender
+          printf 'project_paths:\n  - "%s"\n' "$GITHUB_WORKSPACE" >> ~/.codemender/config.yaml
+
+          # Run pre-flight health check (v0.16.0+)
+          cm health --strict || cm init --verify || echo "::warning::Pre-flight check reported non-fatal warnings."
+
+      - name: Execute CodeMender Scan (cm find)
+        id: scan
+        run: |
+          set -uo pipefail
+          CMD_ARGS=("$SCAN_PATH" "--fail-on=NONE" "--sandbox=false" "--yes" "--bypass-warning")
+
+          if [ "$SCAN_MODE" = "quick" ]; then
+            CMD_ARGS+=("--quick")
+          elif [ "$SCAN_MODE" = "diff" ]; then
+            BASE_BRANCH="${GITHUB_BASE_REF:-main}"
+            CMD_ARGS+=("--diff=origin/${BASE_BRANCH}" "--diff-workers=16")
+          else
+            CMD_ARGS+=("--deep-workers=8")
+          fi
+
+          if [ -n "$CM_MODEL" ]; then
+            CMD_ARGS+=("--model=$CM_MODEL")
+          fi
+          if [ -n "$CM_CONTEXT" ]; then
+            CMD_ARGS+=("-c" "$CM_CONTEXT")
+          fi
+
+          echo "Executing: cm find ${CMD_ARGS[*]}"
+          cm find "${CMD_ARGS[@]}" 2>&1 | tee "$RUNNER_TEMP/cm-find.log" || true
+
+      - name: Export Reports, Token Telemetry & Triage Findings
+        id: triage
+        if: ${{ always() && steps.scan.conclusion != 'skipped' }}
+        run: |
+          set -uo pipefail
+          cm report --format=sarif > "$RUNNER_TEMP/codemender.sarif" 2>/dev/null || echo '{}' > "$RUNNER_TEMP/codemender.sarif"
+          cm report --format=json --status=OPEN > "$RUNNER_TEMP/codemender-open.json" 2>/dev/null || echo '[]' > "$RUNNER_TEMP/codemender-open.json"
+          cm stats --json > "$RUNNER_TEMP/codemender-stats.json" 2>/dev/null || echo '{}' > "$RUNNER_TEMP/codemender-stats.json"
+
+          jq --arg sev "$FIX_SEVERITIES" '
+            ($sev | ascii_upcase | split(",")) as $target_sevs
+            | [ .[]
+                | select((.title // "") | startswith("[LEGACY / UNTOUCHED]") | not)
+                | select((.severity // "" | ascii_upcase) as $s | $target_sevs | index($s))
+              ]
+            | sort_by(if (.severity | ascii_upcase) == "CRITICAL" then 0 else 1 end)
+          ' "$RUNNER_TEMP/codemender-open.json" > "$RUNNER_TEMP/target-findings.json"
+
+          TOTAL_HIGH_CRIT=$(jq 'length' "$RUNNER_TEMP/target-findings.json")
+          jq --argjson limit "$FIX_LIMIT" '.[:$limit]' "$RUNNER_TEMP/target-findings.json" > "$RUNNER_TEMP/to-fix.json"
+          FIX_COUNT=$(jq 'length' "$RUNNER_TEMP/to-fix.json")
+
+          echo "high_critical=$TOTAL_HIGH_CRIT" >> "$GITHUB_OUTPUT"
+          echo "fix_count=$FIX_COUNT" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### 🛡️ CodeMender Security Report (\`${GITHUB_REPOSITORY}\` • \`$SCAN_MODE\` mode)"
+            echo "- **Target Severities (\`$FIX_SEVERITIES\`):** $TOTAL_HIGH_CRIT open finding(s)"
+            echo "- **Auto-Remediation Enabled:** \`$ENABLE_AUTOFIX\` (queued: $FIX_COUNT, limit: $FIX_LIMIT)"
+            echo ""
+            if [ "$TOTAL_HIGH_CRIT" -gt 0 ]; then
+              echo "| Finding ID | Severity | Vulnerability | File |"
+              echo "| :--- | :--- | :--- | :--- |"
+              jq -r '.[] | "| `\(.finding_id // .id)` | **\(.severity)** | \(.title) | `\(.file_path // .location // "n/a")` |"' "$RUNNER_TEMP/target-findings.json"
+            else
+              echo "✅ No open \`$FIX_SEVERITIES\` vulnerabilities detected."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SARIF v2.1.0 to GitHub Code Scanning
+        if: ${{ always() && env.UPLOAD_SARIF == 'true' && steps.scan.conclusion != 'skipped' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ runner.temp }}/codemender.sarif
+          category: codemender-${{ inputs.scan_mode }}
+        continue-on-error: true
+
+      - name: Autonomous Remediation (cm fix -> Atomic Commits)
+        id: fix
+        if: >-
+          env.ENABLE_AUTOFIX == 'true' &&
+          github.event_name != 'pull_request' &&
+          steps.triage.outputs.fix_count != '0' &&
+          steps.triage.outputs.fix_count != ''
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          jq -r '.[] | [(.finding_id // .id), (.severity // "HIGH"), (.title // "Security vulnerability")] | @tsv' \
+            "$RUNNER_TEMP/to-fix.json" > "$RUNNER_TEMP/findings.tsv"
+
+          FIXED_SUMMARY=""
+          FIXED_SUCCESS=0
+
+          while IFS=$'\t' read -r FID FSEV FTITLE; do
+            [ -z "$FID" ] && continue
+            echo "::group::Remediating [$FSEV] $FTITLE ($FID)"
+
+            if cm fix "$FID" --sandbox=false --yes --bypass-warning < /dev/null 2>&1 | tee "$RUNNER_TEMP/fix-$FID.log" && \
+               ! git diff --quiet; then
+              git add -u
+              git commit -m "fix(security): remediate $FTITLE [$FSEV]" -m "CodeMender Finding ID: $FID"
+              FIXED_SUCCESS=$((FIXED_SUCCESS + 1))
+              FIXED_SUMMARY="${FIXED_SUMMARY}- **[$FSEV]** \`$FID\`: $FTITLE"$'\n'
+              echo "✅ Successfully patched and committed $FID"
+            else
+              echo "::warning::CodeMender could not produce a clean patch for $FID ($FTITLE)."
+            fi
+
+            # Clean untracked temporary test/repro files before next iteration
+            git checkout HEAD -- .
+            git clean -fd
+            echo "::endgroup::"
+          done < "$RUNNER_TEMP/findings.tsv"
+
+          echo "fixed_success=$FIXED_SUCCESS" >> "$GITHUB_OUTPUT"
+          {
+            echo "fixed_summary<<__EOF__"
+            printf '%s' "$FIXED_SUMMARY"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Export Append-Only FinOps Telemetry & SARIF to GCS (Optional)
+        if: ${{ always() && env.GCS_TELEMETRY_BUCKET != '' && steps.scan.conclusion != 'skipped' }}
+        run: |
+          set -uo pipefail
+          DATE_PARTITION=$(date -u +"%Y/%m/%d")
+          RUN_TS=$(date -u +"%Y%m%dT%H%M%SZ")
+          REPORT_URI="gs://${GCS_TELEMETRY_BUCKET}/codemender-telemetry/${GITHUB_REPOSITORY}/${DATE_PARTITION}/${RUN_TS}-${GITHUB_RUN_ID}"
+
+          echo "Archiving append-only SARIF and token telemetry (no state.db sync) to ${REPORT_URI}/..."
+          gcloud storage cp "$RUNNER_TEMP/codemender-open.json"  "${REPORT_URI}/findings-open.json" || true
+          gcloud storage cp "$RUNNER_TEMP/codemender.sarif"      "${REPORT_URI}/codemender.sarif" || true
+          gcloud storage cp "$RUNNER_TEMP/codemender-stats.json" "${REPORT_URI}/stats.json" || true
+
+      - name: Upload Run Artifacts
+        if: ${{ always() && steps.scan.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codemender-artifacts-${{ inputs.scan_mode }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/codemender-open.json
+            ${{ runner.temp }}/codemender.sarif
+            ${{ runner.temp }}/codemender-stats.json
+            ${{ runner.temp }}/cm-find.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Open Autonomous Remediation Pull Request
+        if: >-
+          env.ENABLE_AUTOFIX == 'true' &&
+          github.event_name != 'pull_request' &&
+          steps.fix.outputs.fixed_success != '0' &&
+          steps.fix.outputs.fixed_success != ''
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          base: ${{ github.ref_name }}
+          branch: codemender/auto-remediation-${{ github.ref_name }}
+          delete-branch: true
+          title: "🛡️ CodeMender: Autonomous Security Remediation (${{ steps.fix.outputs.fixed_success }} fix(es))"
+          labels: |
+            security
+            codemender
+            automated-pr
+          body: |
+            ## 🛡️ CodeMender Autonomous Security Remediation
+
+            This Pull Request was automatically generated by the **CodeMender Asynchronous Security Pipeline** (`${{ inputs.scan_mode }}` mode).
+
+            ### 📊 Scan & Remediation Summary
+            - **Repository:** `${{ github.repository }}` (branch: `${{ github.ref_name }}`)
+            - **Open Target Findings (`${{ inputs.fix_severities }}`):** ${{ steps.triage.outputs.high_critical }}
+            - **Successfully Patched in this PR:** ${{ steps.fix.outputs.fixed_success }}
+
+            ### 🔧 Remediated Vulnerabilities (1 Atomic Commit per Finding)
+            ${{ steps.fix.outputs.fixed_summary }}
+
+            ---
+            > **Reviewer Guidance:** Each vulnerability fix is isolated in its own Git commit so your team can review, cherry-pick, or revert individual fixes cleanly. Full SARIF v2.1.0 and JSON telemetry reports are attached to [Workflow Run #${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+
+      - name: Evaluate Security Gate
+        if: ${{ always() && env.ENFORCE_GATE == 'true' }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.triage.outcome }}" != "success" ]; then
+            echo "::error title=Security Gate Failed::CodeMender scan/triage did not complete successfully."
+            exit 1
+          fi
+          COUNT="${{ steps.triage.outputs.high_critical || '0' }}"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "::error title=Security Gate Blocked::CodeMender detected $COUNT open $FIX_SEVERITIES finding(s)."
+            exit 1
+          fi
+          echo "✅ Security gate passed (0 open $FIX_SEVERITIES findings)."

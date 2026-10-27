@@ -1,0 +1,60 @@
+# =============================================================================
+# CodeMender Ignore File (.cmignore) — Enterprise Token & Scope Optimization
+# =============================================================================
+# Place this file at the root of an application repository to exclude
+# non-production files, test fixtures, generated clients, and static assets
+# from `cm find`, reducing scan latency and Vertex AI token consumption.
+# =============================================================================
+
+# Dependency & Build Directories
+node_modules/
+vendor/
+target/
+build/
+dist/
+out/
+.gradle/
+.mvn/
+.venv/
+venv/
+__pycache__/
+
+# Unit / Integration Test Suites & Mock Data
+**/test/**
+**/tests/**
+**/__tests__/**
+**/__mocks__/**
+**/*Test.java
+**/*Tests.java
+**/*IT.java
+**/*_test.go
+**/*_test.py
+**/*.spec.ts
+**/*.test.ts
+**/*.spec.js
+**/*.test.js
+testdata/
+fixtures/
+
+# Generated Code, Protobufs & OpenAPI / Swagger Stubs
+**/generated/**
+**/gen/**
+**/*.pb.go
+**/*_pb2.py
+**/*_pb2_grpc.py
+openapi/
+swagger/
+
+# Database Migrations & Static Assets
+migrations/
+flyway/
+liquibase/
+public/
+static/
+assets/
+docs/
+*.min.js
+*.bundle.js
+*.map
+*.sql
+*.md

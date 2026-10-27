@@ -1,0 +1,40 @@
+name: CodeMender Monthly Security Audit & Auto-PR
+
+# =============================================================================
+# Caller Workflow (Copy this 25-line file into any of the 103 repositories)
+# =============================================================================
+# Runs asynchronously on the 1st Monday of each month (or manually on demand),
+# executes a full repository deep scan, uploads SARIF to GitHub Code Scanning,
+# archives FinOps token telemetry to GCS, and opens a Pull Request with fixes.
+# =============================================================================
+
+on:
+  schedule:
+    - cron: '0 6 1-7 * 1'   # 1st Monday of every month at 03:00 BRT (06:00 UTC)
+  workflow_dispatch:
+    inputs:
+      scan_mode:
+        description: 'Scan mode (deep, diff, or quick)'
+        default: 'deep'
+        type: choice
+        options: [deep, diff, quick]
+      fix_limit:
+        description: 'Max findings to auto-fix in a PR'
+        default: '5'
+        type: string
+
+jobs:
+  security-audit:
+    uses: Cotomacio/codemender-enterprise-workflows/.github/workflows/codemender-reusable.yml@main
+    with:
+      gcp_project_id: ${{ vars.GCP_QUOTA_PROJECT }}
+      gcp_wif_provider: ${{ vars.GCP_WIF_PROVIDER }}
+      gcp_sa_email: ${{ vars.GCP_SA_EMAIL }}
+      gcp_telemetry_bucket: ${{ vars.GCP_TELEMETRY_BUCKET }}
+      scan_mode: ${{ inputs.scan_mode || 'deep' }}
+      enable_autofix: true
+      fix_severities: 'CRITICAL,HIGH'
+      fix_limit: ${{ inputs.fix_limit || '5' }}
+      enforce_gate: false
+    secrets:
+      wif_audience: ${{ secrets.WIF_AUDIENCE }}
