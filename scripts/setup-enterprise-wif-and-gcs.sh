@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-prj-bcb-gcpsecops}"
+PROJECT_ID="${PROJECT_ID:-ai-governance-500520}"
 GITHUB_ORG="${GITHUB_ORG:-Cotomacio}"
 SA_NAME="${SA_NAME:-codemender-ci}"
 POOL_ID="${POOL_ID:-github-org-pool}"
@@ -64,6 +64,10 @@ gcloud storage buckets add-iam-policy-binding "gs://${TELEMETRY_BUCKET}" \
   --quiet >/dev/null
 
 echo "==> [5/6] Configuring Workload Identity Pool (${POOL_ID}) & OIDC Provider (${PROVIDER_ID})..."
+gcloud resource-manager org-policies allow iam.workloadIdentityPoolProviders \
+  "is:https://token.actions.githubusercontent.com" \
+  --project="${PROJECT_ID}" >/dev/null 2>&1 || true
+
 if ! gcloud iam workload-identity-pools describe "${POOL_ID}" --project="${PROJECT_ID}" --location="global" >/dev/null 2>&1; then
   gcloud iam workload-identity-pools create "${POOL_ID}" \
     --project="${PROJECT_ID}" \

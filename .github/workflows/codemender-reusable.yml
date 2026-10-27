@@ -155,11 +155,25 @@ jobs:
           service_account: ${{ inputs.gcp_sa_email }}
           audience: ${{ secrets.wif_audience }}
 
+      - name: Relocate WIF Credentials Outside Git Workspace
+        run: |
+          set -euo pipefail
+          if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+            cp "$GOOGLE_APPLICATION_CREDENTIALS" "$RUNNER_TEMP/gcp-creds.json"
+            chmod 600 "$RUNNER_TEMP/gcp-creds.json"
+            rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp-creds.json" >> "$GITHUB_ENV"
+            echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$RUNNER_TEMP/gcp-creds.json" >> "$GITHUB_ENV"
+          fi
+          rm -f "$HOME/.config/gcloud/application_default_credentials.json"
+
       - name: Download & Install CodeMender CLI
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/cmbin"
           echo "Downloading CodeMender CLI (version: $CM_VERSION) from Artifact Registry..."
+          curl -fsSL -o "$RUNNER_TEMP/cm-linux-amd64.zip" \
+            "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3A${CM_VERSION}%3Acm-linux-amd64.zip:download?alt=media" || \
           gcloud artifacts generic download \
             --project=cmoc-prod \
             --location=us \
@@ -183,6 +197,9 @@ jobs:
           cm init
           mkdir -p ~/.codemender
           printf 'project_paths:\n  - "%s"\n' "$GITHUB_WORKSPACE" >> ~/.codemender/config.yaml
+          if git ls-files '*.py' | grep -q . && [ -f ~/.codemender/config.yaml ]; then
+            sed -i 's/command: ""/command: "python3 -m compileall -q ."/' ~/.codemender/config.yaml || true
+          fi
 
           # Run pre-flight health check (v0.16.0+)
           cm health --strict || cm init --verify || echo "::warning::Pre-flight check reported non-fatal warnings."
@@ -223,12 +240,23 @@ jobs:
 
           jq --arg sev "$FIX_SEVERITIES" '
             ($sev | ascii_upcase | split(",")) as $target_sevs
-            | [ .[]
-                | select((.title // "") | startswith("[LEGACY / UNTOUCHED]") | not)
-                | select((.severity // "" | ascii_upcase) as $s | $target_sevs | index($s))
+            | [ (. // [])[]
+                | select((((.title // .Title) // "") | startswith("[LEGACY / UNTOUCHED]")) | not)
+                | select(((((.severity // .Severity) // "") | ascii_upcase) as $s | $target_sevs | index($s)))
               ]
-            | sort_by(if (.severity | ascii_upcase) == "CRITICAL" then 0 else 1 end)
+            | sort_by(if (((.severity // .Severity) // "") | ascii_upcase) == "CRITICAL" then 0 else 1 end)
           ' "$RUNNER_TEMP/codemender-open.json" > "$RUNNER_TEMP/target-findings.json"
+
+          # Normalize SARIF paths to relative repository paths for GitHub Code Scanning
+          jq --arg ws "${GITHUB_WORKSPACE}/" '
+            if .runs then
+              .runs[].results[]?.locations[]?.physicalLocation |= (
+                (.artifactLocation.uri |= (if startswith($ws) then ltrimstr($ws) else ltrimstr("/") end))
+                | (.region.startLine |= (if (. == null or . < 1) then 1 else . end))
+              )
+            else . end
+          ' "$RUNNER_TEMP/codemender.sarif" > "$RUNNER_TEMP/codemender-norm.sarif" 2>/dev/null && \
+            mv "$RUNNER_TEMP/codemender-norm.sarif" "$RUNNER_TEMP/codemender.sarif" || true
 
           TOTAL_HIGH_CRIT=$(jq 'length' "$RUNNER_TEMP/target-findings.json")
           jq --argjson limit "$FIX_LIMIT" '.[:$limit]' "$RUNNER_TEMP/target-findings.json" > "$RUNNER_TEMP/to-fix.json"
@@ -245,7 +273,7 @@ jobs:
             if [ "$TOTAL_HIGH_CRIT" -gt 0 ]; then
               echo "| Finding ID | Severity | Vulnerability | File |"
               echo "| :--- | :--- | :--- | :--- |"
-              jq -r '.[] | "| `\(.finding_id // .id)` | **\(.severity)** | \(.title) | `\(.file_path // .location // "n/a")` |"' "$RUNNER_TEMP/target-findings.json"
+              jq -r '.[] | "| `\(.finding_id // .FindingID // .id)` | **\(.severity // .Severity)** | \(.title // .Title) | `\(.file_path // .FilePath // .location // "n/a")` |"' "$RUNNER_TEMP/target-findings.json"
             else
               echo "✅ No open \`$FIX_SEVERITIES\` vulnerabilities detected."
             fi
@@ -271,7 +299,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          jq -r '.[] | [(.finding_id // .id), (.severity // "HIGH"), (.title // "Security vulnerability")] | @tsv' \
+          jq -r '.[] | [(.finding_id // .FindingID // .id), (.severity // .Severity // "HIGH"), (.title // .Title // "Security vulnerability")] | @tsv' \
             "$RUNNER_TEMP/to-fix.json" > "$RUNNER_TEMP/findings.tsv"
 
           FIXED_SUMMARY=""
