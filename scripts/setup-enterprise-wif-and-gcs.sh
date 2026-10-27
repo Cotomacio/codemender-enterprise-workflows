@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-ai-governance-500520}"
+PROJECT_ID="${PROJECT_ID:-codemender-latam}"
 GITHUB_ORG="${GITHUB_ORG:-Cotomacio}"
 SA_NAME="${SA_NAME:-codemender-ci}"
 POOL_ID="${POOL_ID:-github-org-pool}"

@@ -337,6 +337,8 @@ jobs:
         if: ${{ always() && env.GCS_TELEMETRY_BUCKET != '' && steps.scan.conclusion != 'skipped' }}
         run: |
           set -uo pipefail
+          # Refresh stats.json to include token usage from cm fix sessions as well
+          cm stats --json > "$RUNNER_TEMP/codemender-stats.json" 2>/dev/null || true
           DATE_PARTITION=$(date -u +"%Y/%m/%d")
           RUN_TS=$(date -u +"%Y%m%dT%H%M%SZ")
           REPORT_URI="gs://${GCS_TELEMETRY_BUCKET}/codemender-telemetry/${GITHUB_REPOSITORY}/${DATE_PARTITION}/${RUN_TS}-${GITHUB_RUN_ID}"
