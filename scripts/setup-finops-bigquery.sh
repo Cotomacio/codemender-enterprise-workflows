@@ -76,62 +76,82 @@ fi
 echo "==> [3/4] Creating BigQuery External Table ${PROJECT_ID}.${BQ_DATASET}.scan_telemetry..."
 bq --location="${BQ_LOCATION}" --project_id="${PROJECT_ID}" query --use_legacy_sql=false <<EOF
 CREATE OR REPLACE EXTERNAL TABLE \`${PROJECT_ID}.${BQ_DATASET}.scan_telemetry\` (
-  event_timestamp TIMESTAMP,
-  scan_date DATE,
-  gcp_project_id STRING,
-  repository STRING,
-  repository_owner STRING,
-  repository_name STRING,
-  scan_mode STRING,
-  scan_path STRING,
-  github_run_id INT64,
-  github_event_name STRING,
-  git_ref STRING,
-  git_sha STRING,
-  total_open_findings INT64,
-  target_findings INT64,
-  fixed_findings INT64,
-  autofix_enabled BOOL,
-  since STRING,
-  total_turns INT64,
-  total_polls INT64,
-  command_types INT64,
-  input_tokens INT64,
-  output_tokens INT64,
-  cached_tokens INT64,
-  thought_tokens INT64,
-  tool_calls INT64,
-  total_tokens INT64,
-  cache_hit_percent FLOAT64,
-  think_ratio_percent FLOAT64,
-  duration_seconds FLOAT64,
-  duration_formatted STRING,
+  event_timestamp TIMESTAMP OPTIONS(description="UTC timestamp when the CodeMender CI/CD workflow completed and exported telemetry."),
+  scan_date DATE OPTIONS(description="UTC calendar date of the CodeMender scan run."),
+  gcp_project_id STRING OPTIONS(description="Google Cloud project ID hosting Gemini Enterprise and CodeMender API quota."),
+  repository STRING OPTIONS(description="Full GitHub repository identifier in 'owner/repo' format (e.g., 'Cotomacio/team-a-payments')."),
+  repository_owner STRING OPTIONS(description="GitHub Organization or user owner name."),
+  repository_name STRING OPTIONS(description="Short GitHub repository name without owner prefix (e.g., 'team-a-payments')."),
+  scan_mode STRING OPTIONS(description="CodeMender scan mode: 'deep' (full repository audit), 'diff' (PR delta + 1-hop callers), or 'quick'."),
+  scan_path STRING OPTIONS(description="Relative directory path scanned within the repository (default '.')."),
+  github_run_id INT64 OPTIONS(description="Unique GitHub Actions workflow run ID (primary key per execution)."),
+  github_event_name STRING OPTIONS(description="GitHub event that triggered the workflow ('schedule', 'pull_request', 'workflow_dispatch')."),
+  git_ref STRING OPTIONS(description="Git branch or tag reference scanned (e.g., 'main')."),
+  git_sha STRING OPTIONS(description="40-character Git commit SHA scanned."),
+  total_open_findings INT64 OPTIONS(description="Total number of OPEN security vulnerabilities detected by CodeMender in this run across all severities."),
+  target_findings INT64 OPTIONS(description="Number of OPEN vulnerabilities matching target fix_severities (e.g., CRITICAL,HIGH) eligible for auto-remediation."),
+  fixed_findings INT64 OPTIONS(description="Number of vulnerabilities autonomously patched, verified, and committed by 'cm fix' during this run."),
+  autofix_enabled BOOL OPTIONS(description="Whether autonomous remediation ('cm fix') was enabled for this workflow run."),
+  since STRING OPTIONS(description="Start timestamp of local CodeMender CLI telemetry tracking."),
+  total_turns INT64 OPTIONS(description="Total Gemini Enterprise conversational turns across all commands in this run."),
+  total_polls INT64 OPTIONS(description="Total asynchronous API polling requests during the run."),
+  command_types INT64 OPTIONS(description="Number of distinct CodeMender CLI command types executed (e.g., 2 when both 'find' and 'fix' run)."),
+  input_tokens INT64 OPTIONS(description="Total Gemini Enterprise input tokens consumed in this run. IMPORTANT: input_tokens ALREADY INCLUDES cached_tokens. Uncached input tokens = GREATEST(input_tokens - cached_tokens, 0)."),
+  output_tokens INT64 OPTIONS(description="Total Gemini Enterprise generated output tokens (excluding thought_tokens)."),
+  cached_tokens INT64 OPTIONS(description="Subset of input_tokens served from Gemini Enterprise Context Cache at a 75% discount ($0.3125/1M vs $1.25/1M uncached)."),
+  thought_tokens INT64 OPTIONS(description="Total Gemini Enterprise internal reasoning/thinking tokens consumed during vulnerability analysis and patch verification."),
+  tool_calls INT64 OPTIONS(description="Total agentic tool invocations executed by CodeMender during analysis and patching."),
+  total_tokens INT64 OPTIONS(description="Total tokens consumed in the run (input_tokens + output_tokens + thought_tokens). Do NOT add cached_tokens to this sum."),
+  cache_hit_percent FLOAT64 OPTIONS(description="Percentage of input_tokens served from Gemini Enterprise Context Cache (cached_tokens / input_tokens * 100)."),
+  think_ratio_percent FLOAT64 OPTIONS(description="Percentage of completion tokens spent on internal reasoning/thought."),
+  duration_seconds FLOAT64 OPTIONS(description="Total active CodeMender CLI execution time in seconds across find and fix phases."),
+  duration_formatted STRING OPTIONS(description="Human-readable active execution duration (e.g., '15m 46s')."),
   buckets ARRAY<STRUCT<
-    label STRING,
-    requests INT64,
-    polls INT64,
-    input_tokens INT64,
-    output_tokens INT64,
-    cached_tokens INT64,
-    thought_tokens INT64,
-    tool_calls INT64,
-    total_tokens INT64,
-    cache_hit_percent FLOAT64,
-    think_ratio_percent FLOAT64,
-    duration_seconds FLOAT64,
-    duration_formatted STRING
-  >>
+    label STRING OPTIONS(description="CLI command bucket label (e.g., 'find --deep', 'find --diff', 'fix', or 'total'). IMPORTANT: Always filter WHERE label != 'total' when unnesting buckets to avoid 2x double-counting."),
+    requests INT64 OPTIONS(description="Number of CLI command invocations in this bucket (e.g., 1 for 'find --deep', or N for 'fix' where N findings were patched)."),
+    polls INT64 OPTIONS(description="Polling count for this command bucket."),
+    input_tokens INT64 OPTIONS(description="Total input tokens for this command bucket (includes cached_tokens)."),
+    output_tokens INT64 OPTIONS(description="Generated output tokens for this command bucket."),
+    cached_tokens INT64 OPTIONS(description="Subset of input_tokens served from Context Cache for this command bucket."),
+    thought_tokens INT64 OPTIONS(description="Internal reasoning tokens for this command bucket."),
+    tool_calls INT64 OPTIONS(description="Agentic tool calls executed within this command bucket."),
+    total_tokens INT64 OPTIONS(description="Total tokens (input_tokens + output_tokens + thought_tokens) for this command bucket."),
+    cache_hit_percent FLOAT64 OPTIONS(description="Context cache hit rate percentage for this command bucket."),
+    think_ratio_percent FLOAT64 OPTIONS(description="Reasoning token ratio percentage for this command bucket."),
+    duration_seconds FLOAT64 OPTIONS(description="Execution duration in seconds for this command bucket."),
+    duration_formatted STRING OPTIONS(description="Human-readable duration for this command bucket (e.g., '02m 12s').")
+  >> OPTIONS(description="Per-command telemetry breakdown array. Contains individual command rows ('find --deep', 'fix') plus a summary row with label='total'. Always exclude label='total' when aggregating.")
 )
 OPTIONS (
   format = 'NEWLINE_DELIMITED_JSON',
   uris = ['gs://${TELEMETRY_BUCKET}/codemender-finops-jsonl/*.jsonl'],
-  ignore_unknown_values = TRUE
+  ignore_unknown_values = TRUE,
+  description = "Granular run-level CodeMender DevSecOps & Gemini Enterprise FinOps telemetry (1 row per GitHub Actions run). Backed by immutable NDJSON records in Cloud Storage."
 );
 EOF
 
 echo "==> [4/4] Creating FinOps Executive Views (${BQ_DATASET}.v_repository_finops_summary & v_command_bucket_breakdown)..."
 bq --location="${BQ_LOCATION}" --project_id="${PROJECT_ID}" query --use_legacy_sql=false <<EOF
-CREATE OR REPLACE VIEW \`${PROJECT_ID}.${BQ_DATASET}.v_repository_finops_summary\` AS
+CREATE OR REPLACE VIEW \`${PROJECT_ID}.${BQ_DATASET}.v_repository_finops_summary\` (
+  repository OPTIONS(description="Full GitHub repository identifier in 'owner/repo' format."),
+  repository_name OPTIONS(description="Short GitHub repository name without owner prefix."),
+  scan_mode OPTIONS(description="CodeMender scan mode ('deep', 'diff', or 'quick')."),
+  total_scans OPTIONS(description="Total number of distinct GitHub Actions workflow runs for this repository and scan_mode."),
+  last_scan_utc OPTIONS(description="UTC timestamp of the most recent scan run."),
+  total_findings_detected OPTIONS(description="Cumulative open vulnerabilities detected across runs."),
+  total_findings_remediated OPTIONS(description="Cumulative vulnerabilities autonomously fixed and committed by 'cm fix' across runs."),
+  total_input_tokens OPTIONS(description="Total Gemini Enterprise input tokens across runs (already includes total_cached_tokens)."),
+  total_cached_tokens OPTIONS(description="Subset of total_input_tokens served from Gemini Enterprise Context Cache at a 75% discount."),
+  total_output_tokens OPTIONS(description="Total generated output tokens across runs."),
+  total_thought_tokens OPTIONS(description="Total internal reasoning/thinking tokens across runs."),
+  total_tokens OPTIONS(description="Total tokens consumed across runs (total_input_tokens + total_output_tokens + total_thought_tokens)."),
+  avg_cache_hit_pct OPTIONS(description="Average context cache hit percentage across runs."),
+  total_duration_sec OPTIONS(description="Cumulative active CLI runtime duration in seconds."),
+  estimated_cost_usd OPTIONS(description="Total estimated Gemini Enterprise cost in USD (Uncached Input @ \$1.25/1M + Cached Input @ \$0.3125/1M + Output & Thought @ \$10.00/1M).")
+)
+OPTIONS(
+  description="Primary FinOps & DevSecOps executive summary view aggregated by repository and scan_mode. Includes scan counts, detected vs. remediated vulnerabilities, token totals, cache hit rate, duration, and estimated USD cost."
+) AS
 SELECT
   repository,
   repository_name,
@@ -157,7 +177,25 @@ FROM \`${PROJECT_ID}.${BQ_DATASET}.scan_telemetry\`
 GROUP BY repository, repository_name, scan_mode
 ORDER BY total_tokens DESC;
 
-CREATE OR REPLACE VIEW \`${PROJECT_ID}.${BQ_DATASET}.v_command_bucket_breakdown\` AS
+CREATE OR REPLACE VIEW \`${PROJECT_ID}.${BQ_DATASET}.v_command_bucket_breakdown\` (
+  event_timestamp OPTIONS(description="UTC timestamp of the workflow run."),
+  repository OPTIONS(description="Full GitHub repository identifier ('owner/repo')."),
+  scan_mode OPTIONS(description="Scan mode ('deep', 'diff', or 'quick')."),
+  github_run_id OPTIONS(description="Unique GitHub Actions workflow run ID."),
+  command_bucket OPTIONS(description="CodeMender CLI command phase ('find --deep', 'find --diff', or 'fix'). Excludes 'total'."),
+  requests OPTIONS(description="Number of CLI command invocations in this phase."),
+  input_tokens OPTIONS(description="Total input tokens in this command phase (already includes cached_tokens)."),
+  cached_tokens OPTIONS(description="Subset of input_tokens served from Gemini Enterprise Context Cache."),
+  output_tokens OPTIONS(description="Generated output tokens in this command phase."),
+  thought_tokens OPTIONS(description="Internal reasoning/thinking tokens in this command phase."),
+  total_tokens OPTIONS(description="Total tokens in this command phase (input_tokens + output_tokens + thought_tokens)."),
+  cache_hit_pct OPTIONS(description="Context cache hit percentage for this command phase."),
+  duration_seconds OPTIONS(description="Active execution duration in seconds for this command phase."),
+  duration_formatted OPTIONS(description="Human-readable duration for this command phase (e.g., '15m 09s').")
+)
+OPTIONS(
+  description="Granular command-phase view comparing detection ('find --deep', 'find --diff') vs. autonomous patch generation ('fix'). Pre-filters out the 'total' summary row to prevent double-counting."
+) AS
 SELECT
   t.event_timestamp,
   t.repository,
