@@ -5,7 +5,8 @@
 **Compliance Alignment:** PCI-DSS v4.0, SOC 2 Type II, ISO/IEC 27001:2022, NIST SP 800-218 (SSDF v1.1), CIS GitHub & GCP Benchmarks, SLSA Build L2, SEC Rule 17a-4, DORA, BACEN Res. 4.893  
 **Live Reference Repositories:**
 - **Central Governance Hub:** [`Cotomacio/codemender-enterprise-workflows`](https://github.com/Cotomacio/codemender-enterprise-workflows)
-- **Sample Consumer Repository (Team A):** [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments)
+- **Sample Consumer Repository (Team A — Payments):** [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments)
+- **Sample Consumer Repository (Team B — Checkout):** [`Cotomacio/team-b-checkout`](https://github.com/Cotomacio/team-b-checkout)
 
 ---
 
@@ -447,100 +448,110 @@ jobs:
 
 ---
 
-### Step 6: End-to-End Execution & Live Verification Walkthrough (`team-a-payments`)
+### Step 6: End-to-End Execution & Multi-Repo FinOps BigQuery Walkthrough (`team-a-payments` & `team-b-checkout`)
 
-To validate the entire architecture end-to-end, we created [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments) containing a sample microservice ([`app.py`](https://github.com/Cotomacio/team-a-payments/blob/main/app.py)) with two intentional `HIGH`-severity vulnerabilities:
-1. **SQL Injection (`CWE-89`)** in `/payments/lookup` (raw string interpolation into `cur.execute()`).
-2. **OS Command Injection (`CWE-78`)** in `/payments/export-receipt` (`subprocess.check_output(..., shell=True)` with unvalidated user input).
+To validate the entire architecture end-to-end across multiple application teams, we onboarded two live consumer repositories:
+1. **[`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments)** ([`app.py`](https://github.com/Cotomacio/team-a-payments/blob/main/app.py)) — Payment Gateway microservice with **2 intentional vulnerabilities**:
+   - **SQL Injection (`CWE-89`, High)** in `/payments/lookup`
+   - **OS Command Injection (`CWE-78`, High)** in `/payments/export-receipt`
+2. **[`Cotomacio/team-b-checkout`](https://github.com/Cotomacio/team-b-checkout)** ([`app.py`](https://github.com/Cotomacio/team-b-checkout/blob/main/app.py)) — E-Commerce Checkout & Fulfilment service with **3 intentional vulnerabilities**:
+   - **OS Command Injection (`CWE-78`, Critical)** in `/checkout/shipping-label`
+   - **SQL Injection (`CWE-89`, High)** in `/checkout/apply-promo`
+   - **Path Traversal (`CWE-22`, High)** in `/checkout/invoice-template`
 
-#### 6.1 Pipeline Execution (`Workflow Run #40435451718`)
-🔗 **Live Run URL:** [`https://github.com/Cotomacio/team-a-payments/actions/runs/40435451718`](https://github.com/Cotomacio/team-a-payments/actions/runs/40435451718)
+#### 6.1 Multi-Repo Pipeline Execution Summary
+- 🔗 **Team A Live Run (`#40699576701`):** [`https://github.com/Cotomacio/team-a-payments/actions/runs/40699576701`](https://github.com/Cotomacio/team-a-payments/actions/runs/40699576701)
+- 🔗 **Team B Live Run (`#40699571878`):** [`https://github.com/Cotomacio/team-b-checkout/actions/runs/40699571878`](https://github.com/Cotomacio/team-b-checkout/actions/runs/40699571878)
 
-| Pipeline Step | Execution Result | Duration |
+| Pipeline Step | Team A (`team-a-payments`) | Team B (`team-b-checkout`) |
 | :--- | :---: | :---: |
-| `Checkout Repository` | ✅ Success | `2s` |
-| `Validate Required Inputs` | ✅ Success | `1s` |
-| `Authenticate to Google Cloud (WIF)` | ✅ Keyless OIDC token minted for `codemender-ci@codemender-latam.iam.gserviceaccount.com` | `2s` |
-| `Protect WIF Credentials Outside Git Workspace` | ✅ Moved ADC credentials to `$RUNNER_TEMP/gcp-creds.json` | `1s` |
-| `Download & Install CodeMender CLI` | ✅ Installed `cm` (`v0.16.6`) from Artifact Registry | `2s` |
-| `Initialize Stateless CodeMender Workspace` | ✅ `cm init` + `cm health --strict` passed | `19s` |
-| `Execute CodeMender Scan (cm find)` | ✅ Found **2 HIGH** vulnerabilities (`SQLINY4A`, `CMDI3413`) | `7m 46s` |
-| `Export Reports, Token Telemetry & Triage Findings` | ✅ Normalized SARIF & generated Job Summary table | `5s` |
-| `Upload SARIF v2.1.0 to GitHub Code Scanning` | ✅ Uploaded SARIF (`category: codemender-deep`) | `10s` |
-| `Autonomous Remediation (cm fix -> Atomic Commits)` | ✅ Generated & verified 2 patches (`2/2` fixed) | `12m 11s` |
-| `Archive Telemetry & SARIF to GCS` | ✅ Exported to `gs://codemender-latam-codemender-telemetry/...` | `5s` |
-| `Upload Reports as Workflow Artifacts` | ✅ Attached `codemender-reports-deep-40435451718` | `2s` |
-| `Open Autonomous Remediation Pull Request` | ✅ Opened [PR #1](https://github.com/Cotomacio/team-a-payments/pull/1) on branch `codemender/remediate-main` | `5s` |
+| `Authenticate to Google Cloud (WIF)` | ✅ Keyless OIDC (`codemender-ci@...`) | ✅ Keyless OIDC (`codemender-ci@...`) |
+| `Protect WIF Credentials Outside Git Workspace` | ✅ Isolated in `$RUNNER_TEMP/gcp-creds.json` | ✅ Isolated in `$RUNNER_TEMP/gcp-creds.json` |
+| `Download & Install CodeMender CLI` | ✅ Installed `cm` + verified SHA-256 | ✅ Installed `cm` + verified SHA-256 |
+| `Execute CodeMender Scan (cm find)` | ✅ Found **2 HIGH** vulnerabilities (`37s`) | ✅ Found **1 CRITICAL, 2 HIGH** (`2m 12s`) |
+| `Upload SARIF v2.1.0 to GitHub Code Scanning` | ✅ Uploaded (`category: codemender-deep`) | ✅ Uploaded (`category: codemender-deep`) |
+| `Autonomous Remediation (cm fix -> Atomic Commits)` | ✅ Fixed **2/2** findings (`15m 09s`) | ✅ Fixed **3/3** findings (`27m 07s`) |
+| `Export FinOps Telemetry & Archive SARIF to GCS` | ✅ Exported `telemetry.jsonl` & `sarif` (`--no-clobber`) | ✅ Exported `telemetry.jsonl` & `sarif` (`--no-clobber`) |
+| `Open Autonomous Remediation Pull Request` | ✅ Opened [PR #2](https://github.com/Cotomacio/team-a-payments/pull/2) | ✅ Opened [PR #1](https://github.com/Cotomacio/team-b-checkout/pull/1) |
 
 #### 6.2 Output 1: Native GitHub Code Scanning Alerts (SARIF v2.1.0)
-Immediately after `Upload SARIF v2.1.0 to GitHub Code Scanning`, both vulnerabilities appeared natively in the **Security → Code scanning** tab of `team-a-payments`:
-- 🔗 **[Alert #1 — OS Command Injection in Receipt Export (`CWE-78`, High)](https://github.com/Cotomacio/team-a-payments/security/code-scanning/1)** (`app.py:42`)
-- 🔗 **[Alert #2 — SQL Injection in Payment Lookup (`CWE-89`, High)](https://github.com/Cotomacio/team-a-payments/security/code-scanning/2)** (`app.py:25`)
+Both repositories display their vulnerabilities natively in **Security → Code scanning**:
+- **Team A (`team-a-payments`):** [Alert #1 (`CWE-78`)](https://github.com/Cotomacio/team-a-payments/security/code-scanning/1) & [Alert #2 (`CWE-89`)](https://github.com/Cotomacio/team-a-payments/security/code-scanning/2)
+- **Team B (`team-b-checkout`):** [Code Scanning Alerts (`CWE-78`, `CWE-89`, `CWE-22`)](https://github.com/Cotomacio/team-b-checkout/security/code-scanning)
 
-#### 6.3 Output 2: Automated Remediation Pull Request with Atomic Commits
-CodeMender opened **[Pull Request #1: `fix(security): CodeMender autonomous remediation (2 finding(s))`](https://github.com/Cotomacio/team-a-payments/pull/1)** containing **2 separate atomic commits**:
-1. **Commit [`c8aa44a`](https://github.com/Cotomacio/team-a-payments/pull/1/commits/c8aa44a428c4565e14217371784bd5563b819749) (`SQLINY4A`):** Replaced string formatting with parameterized SQL queries (`WHERE customer_id = ?`, `(customer_id,)`).
-2. **Commit [`97dfde6`](https://github.com/Cotomacio/team-a-payments/pull/1/commits/97dfde69fd77de86d94f70360a0d2f0eb99e2d8d) (`CMDI3413`):** Removed `shell=True`, removed `/bin/sh -c` interpolation, and enforced strict `^[a-zA-Z0-9_-]+$` validation on `invoice_id`.
+#### 6.3 Output 2: Automated Remediation Pull Requests with Atomic Commits
+- **Team A ([PR #2](https://github.com/Cotomacio/team-a-payments/pull/2) / [PR #1](https://github.com/Cotomacio/team-a-payments/pull/1)):** Remediated SQL Injection (`CWE-89`) with parameterized SQL queries and OS Command Injection (`CWE-78`) by eliminating `shell=True` and enforcing strict regex validation.
+- **Team B ([PR #1](https://github.com/Cotomacio/team-b-checkout/pull/1)):** Remediated all 3 vulnerabilities in 3 isolated atomic commits (`21d180bb` for OS Command Injection, `ec4994fd` for SQL Injection, and `5f12c6a6` for Path Traversal).
 
-#### 6.4 Output 3: Centralized FinOps & Security Telemetry in Cloud Storage
-Every execution archives three immutable files to Google Cloud Storage partitioned by organization, repository, date, and run ID:
+#### 6.4 Output 3: Centralized FinOps Telemetry in GCS & BigQuery External Table Analytics
+After `cm fix` completes, the reusable workflow refreshes `cm stats --json` so both `find` and `fix` token buckets are captured, enriches the payload with GitHub repository/run metadata, and writes a single-line **Newline-Delimited JSON (`codemender-telemetry.jsonl`)** record to two immutable GCS paths using `--no-clobber`:
 
 ```text
 gs://codemender-latam-codemender-telemetry/
-└── codemender-telemetry/
-    └── Cotomacio/
-        └── team-a-payments/
-            └── 2026/10/27/
-                └── 20261027T021200Z-40435451718/
-                    ├── codemender.sarif      # Full SARIF v2.1.0 report for central ASPM / SIEM ingestion
-                    ├── findings-open.json    # Structured JSON snapshot of findings detected
-                    └── stats.json            # Vertex AI Gemini token consumption & latency metrics
+├── codemender-telemetry/                                       # 1. Partitioned Audit Archive (SARIF + Findings + Stats)
+│   └── Cotomacio/
+│       ├── team-a-payments/2026/10/28/20261028T140308Z-40699576701/
+│       │   ├── codemender.sarif
+│       │   ├── findings-open.json
+│       │   ├── stats.json
+│       │   └── telemetry.jsonl
+│       └── team-b-checkout/2026/10/28/20261028T141632Z-40699571878/
+│           ├── codemender.sarif
+│           ├── findings-open.json
+│           ├── stats.json
+│           └── telemetry.jsonl
+└── codemender-finops-jsonl/                                    # 2. Flat NDJSON Prefix for BigQuery External Table
+    ├── 20261028T140308Z-40699576701-Cotomacio_team-a-payments.jsonl
+    └── 20261028T141632Z-40699571878-Cotomacio_team-b-checkout.jsonl
 ```
 
-Real `stats.json` captured from Run `#40435451718` (`find` + `fix` across 2 vulnerabilities):
-```json
-{
-  "by_command": [
-    {
-      "command": "find",
-      "duration_ms": 465370,
-      "model": "gemini-3.1-pro-preview",
-      "tokens": {
-        "cached": 1353620,
-        "input": 1528408,
-        "output": 49164,
-        "thinking": 35785,
-        "total": 1577572
-      }
-    },
-    {
-      "command": "fix",
-      "duration_ms": 727536,
-      "model": "gemini-3.1-pro-preview",
-      "tokens": {
-        "cached": 1767330,
-        "input": 2033630,
-        "output": 42159,
-        "thinking": 28759,
-        "total": 2075789
-      }
-    }
-  ],
-  "totals": {
-    "duration_ms": 1192906,
-    "tokens": {
-      "cached": 3120950,
-      "input": 3562038,
-      "output": 91323,
-      "thinking": 64544,
-      "total": 3653361
-    }
-  }
-}
+##### Provisioning BigQuery FinOps Analytics (`scripts/setup-finops-bigquery.sh`)
+Run the included provisioning script ([`scripts/setup-finops-bigquery.sh`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/scripts/setup-finops-bigquery.sh)) once to create the `codemender_finops` dataset, the `scan_telemetry` External Table over `gs://codemender-latam-codemender-telemetry/codemender-finops-jsonl/*.jsonl`, and two executive FinOps views:
+
+```bash
+./scripts/setup-finops-bigquery.sh codemender-latam codemender-latam-codemender-telemetry codemender_finops
 ```
+
+##### Live BigQuery Query 1: Executive Multi-Repository FinOps Summary (`v_repository_finops_summary`)
+```sql
+SELECT
+  repository, scan_mode, total_scans,
+  total_findings_detected AS detected,
+  total_findings_remediated AS remediated,
+  total_input_tokens, total_cached_tokens,
+  total_output_tokens, total_thought_tokens, total_tokens,
+  avg_cache_hit_pct, total_duration_sec, estimated_cost_usd
+FROM `codemender-latam.codemender_finops.v_repository_finops_summary`;
+```
+
+**Live BigQuery Output (`codemender-latam`):**
+
+| `repository` | `scan_mode` | `total_scans` | `detected` | `remediated` | `total_input_tokens` | `total_cached_tokens` | `total_output_tokens` | `total_thought_tokens` | `total_tokens` | `avg_cache_hit_pct` | `total_duration_sec` | `estimated_cost_usd` |
+| :--- | :---: | :---: | :---: | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Cotomacio/team-b-checkout` | `deep` | `1` | `3` | `3` | `1,680,613` | `1,237,576` | `5,419` | `50,676` | `1,736,708` | `73.64%` | `1,759.5s` | **`$1.5015`** |
+| `Cotomacio/team-a-payments` | `deep` | `1` | `2` | `2` | `907,225` | `653,921` | `4,415` | `16,120` | `927,760` | `72.08%` | `945.9s` | **`$0.7263`** |
+
+##### Live BigQuery Query 2: Command Bucket Breakdown — `find` vs. `fix` (`v_command_bucket_breakdown`)
+```sql
+SELECT
+  repository, command_bucket, requests,
+  input_tokens, cached_tokens, output_tokens, thought_tokens,
+  total_tokens, cache_hit_pct, duration_formatted
+FROM `codemender-latam.codemender_finops.v_command_bucket_breakdown`;
+```
+
+**Live BigQuery Output (`codemender-latam`):**
+
+| `repository` | `command_bucket` | `requests` | `input_tokens` | `cached_tokens` | `output_tokens` | `thought_tokens` | `total_tokens` | `cache_hit_pct` | `duration_formatted` |
+| :--- | :---: | :---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: |
+| `Cotomacio/team-b-checkout` | `fix` | `3` | `1,603,111` | `1,197,237` | `3,847` | `32,076` | `1,639,034` | `74.68%` | `27m 07s` |
+| `Cotomacio/team-b-checkout` | `find --deep` | `1` | `77,502` | `40,339` | `1,572` | `18,600` | `97,674` | `52.05%` | `02m 12s` |
+| `Cotomacio/team-a-payments` | `fix` | `2` | `887,626` | `650,000` | `3,329` | `13,697` | `904,652` | `73.23%` | `15m 09s` |
+| `Cotomacio/team-a-payments` | `find --deep` | `1` | `19,599` | `3,921` | `1,086` | `2,423` | `23,108` | `20.01%` | `00m 37s` |
+
 > [!TIP]
-> **FinOps Insight — 87.6% Prompt Caching Efficiency:**  
-> Notice that out of `3,562,038` input tokens processed across `cm find` and `cm fix`, **`3,120,950` tokens (87.6%) were served from Vertex AI Context Cache (`cached`)**, dramatically reducing per-scan token cost. Platform teams can mount a BigQuery External Table over `gs://<BUCKET>/codemender-telemetry/*/*/*/*/*/stats.json` to build real-time Looker Studio FinOps chargeback dashboards by repository and business unit.
+> **FinOps Insight — Over 72% Context Cache Efficiency & Sub-Dollar Remediation:**  
+> Across both repositories (`2.66M` total tokens), Vertex AI Context Caching served **72.1% to 73.6%** of all input tokens from cache. Full deep-scan detection plus autonomous patch generation and verification cost **`$0.73` total for Team A (`$0.36` per fixed vulnerability)** and **`$1.50` total for Team B (`$0.50` per fixed vulnerability)**. Platform teams can connect **Looker Studio** directly to `codemender-latam.codemender_finops.v_repository_finops_summary` for real-time FinOps chargeback dashboards by repository and business unit.
 
 ---
 
