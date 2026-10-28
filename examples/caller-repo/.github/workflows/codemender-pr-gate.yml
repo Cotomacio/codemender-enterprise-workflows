@@ -1,22 +1,31 @@
-name: CodeMender PR Delta Security Gate
+name: CodeMender — Pull Request Security Gate (Diff Mode)
 
 # =============================================================================
-# Caller Workflow for Pull Requests (Optional Synchronous SDLC Gate)
+# Caller Workflow Template (Copy into application repositories)
 # =============================================================================
-# Runs `cm find --diff` on every Pull Request targeting `main`, analyzing only
-# modified hunks and 1-hop caller/callee dependencies in < 2 minutes.
-# Blocks the PR only if NEW Critical/High vulnerabilities are introduced.
+# Runs a fast `--diff` scan on Pull Requests targeting `main`, analyzing only
+# modified files and their 1-hop callers/callees. Blocks the PR (fail-closed)
+# if new CRITICAL or HIGH vulnerabilities are introduced or if the scan errors.
+#
+# Least-Privilege Security Note:
+#   Because `enable_autofix` is `false` on PR gates, this workflow grants ONLY
+#   `contents: read` and `pull-requests: read` to `GITHUB_TOKEN`.
 # =============================================================================
 
 on:
   pull_request:
-    branches: [ "main", "master" ]
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
+    branches:
+      - main
+      - master
 
 jobs:
-  pr-delta-gate:
+  pr-security-gate:
+    permissions:
+      contents: read           # Read-only checkout for PR delta scan (no branch write access)
+      pull-requests: read      # Read-only PR metadata
+      id-token: write          # Mint GCP Workload Identity Federation OIDC token
+      security-events: write   # Upload SARIF v2.1.0 annotations to the Pull Request
+      actions: read            # Required by github/codeql-action/upload-sarif in private repos
     uses: Cotomacio/codemender-enterprise-workflows/.github/workflows/codemender-reusable.yml@main
     with:
       gcp_project_id: ${{ vars.GCP_QUOTA_PROJECT }}
@@ -27,5 +36,4 @@ jobs:
       enable_autofix: false
       fix_severities: 'CRITICAL,HIGH'
       enforce_gate: true
-    secrets:
-      wif_audience: ${{ secrets.WIF_AUDIENCE }}
+      upload_sarif: true

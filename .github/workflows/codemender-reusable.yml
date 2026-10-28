@@ -3,20 +3,43 @@ name: CodeMender Enterprise Reusable Workflow
 # =============================================================================
 # Google Cloud CodeMender — Enterprise Reusable Workflow (workflow_call)
 # =============================================================================
-# Centralizes CodeMender CLI execution so 100+ application repositories can
-# inherit a single, standardized, centrally governed DevSecOps pipeline.
+# Centralizes CodeMender CLI execution so 100+ to 1,000+ application repositories
+# can inherit a single, standardized, centrally governed DevSecOps pipeline
+# engineered for regulated industries (PCI-DSS v4.0, SOC 2 Type II, ISO 27001,
+# NIST SP 800-218 SSDF, CIS GitHub Benchmark, SLSA Build L2).
 #
-# Key Enterprise Capabilities:
+# Key Enterprise & Regulated-Industry Capabilities:
 #   1. 100% Stateless Runner: No SQLite (`state.db`) synchronization across runs;
 #      vulnerability lifecycle & deduplication are managed via SARIF v2.1.0 in
 #      GitHub Code Scanning / ASPM and automated Pull Requests.
-#   2. Zero external script dependencies (100% self-contained bash + jq).
-#   3. Supports both Asynchronous Deep Audits (`deep`) and PR Gates (`diff`).
-#   4. Keyless OIDC authentication via GCP Workload Identity Federation (WIF).
-#   5. Protects WIF credentials from `git clean -fd` during `cm fix`.
-#   6. Creates atomic Git commits (1 commit per remediated vulnerability) and
-#      opens/updates an automated Pull Request for developer review.
-#   7. Optional append-only FinOps/audit export (`stats.json` & `sarif`) to GCS.
+#   2. Supply-Chain Hardened: All official GitHub/Google actions are pinned to
+#      immutable 40-character commit SHAs; zero third-party community actions;
+#      SHA-256 digest logging & optional strict verification (`cm_sha256`) for
+#      the CodeMender CLI binary.
+#   3. Zero Script Injection: No `${{ ... }}` macro interpolations inside `run:`
+#      blocks; all caller inputs are passed via `env:` and regex-validated.
+#   4. Fail-Closed Security Gate: Captures `cm find` exit status via PIPESTATUS
+#      so API/quota/auth crashes never result in a false-positive gate pass.
+#   5. Deterministic Cron Jitter: Prevents Vertex AI `429 Resource Exhausted`
+#      thundering-herd spikes when 100+ repositories run on scheduled cron.
+#   6. Untrusted Workspace Isolation: Purges pre-existing `.cm_project` and
+#      `.codemender` configs before `cm init`, protects WIF credentials from
+#      `git clean -fd`, bypasses untrusted `.git/hooks` via `--no-verify`, and
+#      shreds temporary WIF credentials in an `always()` cleanup step.
+#   7. Native PR Creation via `gh` CLI: Creates atomic Git commits (1 commit per
+#      remediated vulnerability) and opens/updates an automated Pull Request
+#      supporting custom GitHub App tokens (`secrets.pr_token`) to trigger
+#      required downstream CI checks and branch rulesets.
+#   8. Append-Only FinOps & Audit Export: Uploads `stats.json` and `sarif` with
+#      `--no-clobber` to a WORM-capable GCS bucket (`roles/storage.objectCreator`).
+#
+# Caller Permissions Guidance (declare in caller job `permissions:`):
+#   - Async Auto-PR (`enable_autofix: true`):
+#       contents: write, pull-requests: write, id-token: write,
+#       security-events: write, actions: read
+#   - PR Gate (`enable_autofix: false`):
+#       contents: read, pull-requests: read, id-token: write,
+#       security-events: write, actions: read
 # =============================================================================
 
 on:
@@ -49,6 +72,11 @@ on:
         required: false
         default: 'deep'
         type: string
+      cm_location:
+        description: 'Google Cloud region/location for CodeMender / Vertex AI API calls (e.g., global, us-central1, europe-west1)'
+        required: false
+        default: 'global'
+        type: string
       cm_model:
         description: 'Optional Gemini model override (leave empty for CLI default)'
         required: false
@@ -74,8 +102,23 @@ on:
         required: false
         default: '5'
         type: string
+      deep_workers:
+        description: 'Number of concurrent workers for deep scan mode (--deep-workers)'
+        required: false
+        default: '8'
+        type: string
+      diff_workers:
+        description: 'Number of concurrent workers for diff scan mode (--diff-workers)'
+        required: false
+        default: '16'
+        type: string
+      schedule_jitter_max_seconds:
+        description: 'Maximum deterministic jitter delay in seconds for scheduled runs to prevent Vertex AI quota spikes (0 to disable)'
+        required: false
+        default: '300'
+        type: string
       enforce_gate:
-        description: 'Fail the workflow job (exit 1) if open target findings remain'
+        description: 'Fail the workflow job (exit 1, fail-closed) if scan errors or open target findings remain'
         required: false
         default: false
         type: boolean
@@ -89,9 +132,17 @@ on:
         required: false
         default: 'stable'
         type: string
+      cm_sha256:
+        description: 'Optional expected SHA-256 hex digest of cm-linux-amd64.zip for strict binary supply-chain verification'
+        required: false
+        default: ''
+        type: string
     secrets:
       wif_audience:
         description: 'Optional custom OIDC audience string if required by the WIF provider'
+        required: false
+      pr_token:
+        description: 'Optional GitHub App token or PAT to push remediation branches and trigger required downstream CI checks (defaults to github.token)'
         required: false
 
 jobs:
@@ -105,17 +156,10 @@ jobs:
       group: codemender-${{ github.repository }}-${{ inputs.scan_mode }}-${{ github.ref_name }}
       cancel-in-progress: ${{ inputs.scan_mode == 'diff' }}
 
-    permissions:
-      contents: write          # Required to push remediation branch when enable_autofix is true
-      pull-requests: write     # Required to open/update remediation Pull Request
-      id-token: write          # Required for GCP Workload Identity Federation OIDC token
-      security-events: write   # Required to upload SARIF to GitHub Code Scanning
-      actions: read            # Required by github/codeql-action/upload-sarif in private repos
-
     env:
       CLOUD_ML_PROJECT_ID: ${{ inputs.gcp_project_id }}
       GOOGLE_CLOUD_PROJECT: ${{ inputs.gcp_project_id }}
-      CM_LOCATION: global
+      CM_LOCATION: ${{ inputs.cm_location }}
       SCAN_PATH: ${{ inputs.scan_path }}
       SCAN_MODE: ${{ inputs.scan_mode }}
       CM_MODEL: ${{ inputs.cm_model }}
@@ -123,75 +167,123 @@ jobs:
       ENABLE_AUTOFIX: ${{ inputs.enable_autofix }}
       FIX_SEVERITIES: ${{ inputs.fix_severities }}
       FIX_LIMIT: ${{ inputs.fix_limit }}
+      DEEP_WORKERS: ${{ inputs.deep_workers }}
+      DIFF_WORKERS: ${{ inputs.diff_workers }}
+      JITTER_MAX_SECONDS: ${{ inputs.schedule_jitter_max_seconds }}
       ENFORCE_GATE: ${{ inputs.enforce_gate }}
       UPLOAD_SARIF: ${{ inputs.upload_sarif }}
       GCS_TELEMETRY_BUCKET: ${{ inputs.gcp_telemetry_bucket }}
       CM_VERSION: ${{ inputs.cm_version }}
+      CM_SHA256: ${{ inputs.cm_sha256 }}
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate Required Inputs
+      - name: Validate Required Inputs & Sanitize Parameters
+        env:
+          GCP_WIF_PROVIDER: ${{ inputs.gcp_wif_provider }}
+          GCP_SA_EMAIL: ${{ inputs.gcp_sa_email }}
         run: |
           set -euo pipefail
           MISSING=""
-          [ -n "${{ inputs.gcp_project_id }}" ]   || MISSING="$MISSING gcp_project_id"
-          [ -n "${{ inputs.gcp_wif_provider }}" ] || MISSING="$MISSING gcp_wif_provider"
-          [ -n "${{ inputs.gcp_sa_email }}" ]     || MISSING="$MISSING gcp_sa_email"
+          [ -n "${CLOUD_ML_PROJECT_ID:-}" ] || MISSING="$MISSING gcp_project_id"
+          [ -n "${GCP_WIF_PROVIDER:-}" ]    || MISSING="$MISSING gcp_wif_provider"
+          [ -n "${GCP_SA_EMAIL:-}" ]        || MISSING="$MISSING gcp_sa_email"
           if [ -n "$MISSING" ]; then
             echo "::error title=Missing Required Inputs::The following inputs were empty:$MISSING. Check your Organization or Repository Variables."
             exit 1
           fi
+          if [[ ! "$SCAN_MODE" =~ ^(deep|diff|quick)$ ]]; then
+            echo "::error title=Invalid Input::scan_mode must be one of: deep, diff, quick."
+            exit 1
+          fi
+          if [[ ! "$FIX_LIMIT" =~ ^[0-9]+$ ]] || [[ ! "$DEEP_WORKERS" =~ ^[0-9]+$ ]] || [[ ! "$DIFF_WORKERS" =~ ^[0-9]+$ ]] || [[ ! "$JITTER_MAX_SECONDS" =~ ^[0-9]+$ ]]; then
+            echo "::error title=Invalid Numeric Input::fix_limit, deep_workers, diff_workers, and schedule_jitter_max_seconds must be non-negative integers."
+            exit 1
+          fi
+          if [[ ! "$CM_VERSION" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "::error title=Invalid CLI Version::cm_version contains invalid characters."
+            exit 1
+          fi
+          if [[ ! "$CM_LOCATION" =~ ^[a-zA-Z0-9-]+$ ]]; then
+            echo "::error title=Invalid Location::cm_location contains invalid characters."
+            exit 1
+          fi
+          if [ -n "${CM_SHA256:-}" ] && [[ ! "$CM_SHA256" =~ ^[a-fA-F0-9]{64}$ ]]; then
+            echo "::error title=Invalid SHA-256 Digest::cm_sha256 must be a 64-character hex string."
+            exit 1
+          fi
+
+      - name: Apply Deterministic Cron Jitter (Scheduled Runs Only)
+        if: ${{ github.event_name == 'schedule' && inputs.schedule_jitter_max_seconds != '0' }}
+        run: |
+          set -euo pipefail
+          if [ "$JITTER_MAX_SECONDS" -gt 0 ]; then
+            REPO_HASH=$(printf '%s' "$GITHUB_REPOSITORY" | cksum | awk '{print $1}')
+            DELAY=$(( REPO_HASH % JITTER_MAX_SECONDS ))
+            echo "Applying deterministic per-repository cron jitter of ${DELAY}s (max: ${JITTER_MAX_SECONDS}s) to prevent Vertex AI quota spikes..."
+            sleep "$DELAY"
+          fi
 
       - name: Authenticate to Google Cloud (WIF)
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
         with:
           project_id: ${{ inputs.gcp_project_id }}
           workload_identity_provider: ${{ inputs.gcp_wif_provider }}
           service_account: ${{ inputs.gcp_sa_email }}
           audience: ${{ secrets.wif_audience }}
 
-      - name: Relocate WIF Credentials Outside Git Workspace
+      - name: Protect WIF Credentials Outside Git Workspace
         run: |
           set -euo pipefail
+          # CRITICAL: CodeMender runs `git checkout HEAD -- . && git clean -fd` inside $GITHUB_WORKSPACE
+          # during `cm find` and `cm fix`. Move the WIF credential file generated by google-github-actions/auth
+          # into $RUNNER_TEMP so `git clean -fd` can never delete it mid-run.
           if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
-            cp "$GOOGLE_APPLICATION_CREDENTIALS" "$RUNNER_TEMP/gcp-creds.json"
-            chmod 600 "$RUNNER_TEMP/gcp-creds.json"
+            SAFE_CREDS="$RUNNER_TEMP/gcp-creds.json"
+            cp "$GOOGLE_APPLICATION_CREDENTIALS" "$SAFE_CREDS"
+            chmod 600 "$SAFE_CREDS"
             rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
-            echo "GOOGLE_APPLICATION_CREDENTIALS=$RUNNER_TEMP/gcp-creds.json" >> "$GITHUB_ENV"
-            echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$RUNNER_TEMP/gcp-creds.json" >> "$GITHUB_ENV"
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$SAFE_CREDS" >> "$GITHUB_ENV"
+            echo "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=$SAFE_CREDS" >> "$GITHUB_ENV"
+            mkdir -p ~/.config/gcloud
+            cp "$SAFE_CREDS" ~/.config/gcloud/application_default_credentials.json
+            chmod 600 ~/.config/gcloud/application_default_credentials.json
           fi
-          rm -f "$HOME/.config/gcloud/application_default_credentials.json"
 
-      - name: Download & Install CodeMender CLI
+      - name: Download, Verify & Install CodeMender CLI
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/cmbin"
           echo "Downloading CodeMender CLI (version: $CM_VERSION) from Artifact Registry..."
-          curl -fsSL -o "$RUNNER_TEMP/cm-linux-amd64.zip" \
-            "https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3A${CM_VERSION}%3Acm-linux-amd64.zip:download?alt=media" || \
-          gcloud artifacts generic download \
-            --project=cmoc-prod \
-            --location=us \
-            --repository=codemender-cli-production \
-            --package=cm \
-            --version="$CM_VERSION" \
-            --name=cm-linux-amd64.zip \
-            --destination="$RUNNER_TEMP"
+          AR_URL="https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3A${CM_VERSION}%3Acm-linux-amd64.zip:download?alt=media"
+          if ! curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors "$AR_URL" -o "$RUNNER_TEMP/cm-linux-amd64.zip"; then
+            echo "Direct download failed; attempting authenticated download via gcloud..."
+            TOKEN="$(gcloud auth print-access-token)"
+            curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors -H "Authorization: Bearer $TOKEN" "$AR_URL" -o "$RUNNER_TEMP/cm-linux-amd64.zip"
+          fi
+          ARCHIVE_SHA256="$(sha256sum "$RUNNER_TEMP/cm-linux-amd64.zip" | awk '{print $1}')"
+          echo "CLI Archive SHA-256: $ARCHIVE_SHA256"
+          if [ -n "${CM_SHA256:-}" ]; then
+            echo "${CM_SHA256}  $RUNNER_TEMP/cm-linux-amd64.zip" | sha256sum --check --strict
+          fi
           unzip -qo "$RUNNER_TEMP/cm-linux-amd64.zip" -d "$RUNNER_TEMP/cmbin"
           chmod +x "$RUNNER_TEMP/cmbin/cm"
+          BINARY_SHA256="$(sha256sum "$RUNNER_TEMP/cmbin/cm" | awk '{print $1}')"
+          echo "CLI Binary SHA-256:  $BINARY_SHA256"
           echo "$RUNNER_TEMP/cmbin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/cmbin/cm" --version
 
       - name: Initialize Stateless CodeMender Workspace
         run: |
           set -euo pipefail
-          # CRITICAL: Exclude WIF credentials and local CodeMender folders from `git clean -fd`,
-          # which CodeMender runs internally before starting `cm find` and `cm fix` sessions.
+          # Purge any untrusted pre-existing .cm_project or .codemender directories in the workspace
+          rm -rf .cm_project .exploit ~/.codemender
+          # Exclude local CodeMender folders and credential files from `git clean -fd`
           printf '%s\n' '.cm_project' '.exploit' 'gha-creds-*.json' >> .git/info/exclude
 
           cm init
@@ -214,9 +306,9 @@ jobs:
             CMD_ARGS+=("--quick")
           elif [ "$SCAN_MODE" = "diff" ]; then
             BASE_BRANCH="${GITHUB_BASE_REF:-main}"
-            CMD_ARGS+=("--diff=origin/${BASE_BRANCH}" "--diff-workers=16")
+            CMD_ARGS+=("--diff=origin/${BASE_BRANCH}" "--diff-workers=${DIFF_WORKERS}")
           else
-            CMD_ARGS+=("--deep-workers=8")
+            CMD_ARGS+=("--deep-workers=${DEEP_WORKERS}")
           fi
 
           if [ -n "$CM_MODEL" ]; then
@@ -227,184 +319,251 @@ jobs:
           fi
 
           echo "Executing: cm find ${CMD_ARGS[*]}"
-          cm find "${CMD_ARGS[@]}" 2>&1 | tee "$RUNNER_TEMP/cm-find.log" || true
+          set +e
+          cm find "${CMD_ARGS[@]}" 2>&1 | tee "$RUNNER_TEMP/cm-find.log"
+          SCAN_RC=${PIPESTATUS[0]}
+          set -e
+          echo "scan_exit_code=$SCAN_RC" >> "$GITHUB_OUTPUT"
+          if [ "$SCAN_RC" -ne 0 ]; then
+            echo "::warning title=CodeMender Scan Non-Zero Exit::cm find exited with status $SCAN_RC. Check logs for API quota or connectivity issues."
+          fi
 
       - name: Export Reports, Token Telemetry & Triage Findings
         id: triage
         if: ${{ always() && steps.scan.conclusion != 'skipped' }}
         run: |
           set -uo pipefail
-          cm report --format=sarif > "$RUNNER_TEMP/codemender.sarif" 2>/dev/null || echo '{}' > "$RUNNER_TEMP/codemender.sarif"
-          cm report --format=json --status=OPEN > "$RUNNER_TEMP/codemender-open.json" 2>/dev/null || echo '[]' > "$RUNNER_TEMP/codemender-open.json"
-          cm stats --json > "$RUNNER_TEMP/codemender-stats.json" 2>/dev/null || echo '{}' > "$RUNNER_TEMP/codemender-stats.json"
+          SARIF_FALLBACK='{"$schema":"https://json.schemastore.org/sarif-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"CodeMender","informationUri":"https://cloud.google.com/"}},"results":[]}]}'
+          if ! cm report --format=sarif > "$RUNNER_TEMP/codemender.sarif" 2>/dev/null || ! jq -e '.runs' "$RUNNER_TEMP/codemender.sarif" >/dev/null 2>&1; then
+            printf '%s\n' "$SARIF_FALLBACK" > "$RUNNER_TEMP/codemender.sarif"
+          fi
+          if ! cm report --format=json --status=OPEN > "$RUNNER_TEMP/codemender-open.json" 2>/dev/null || ! jq -e '.' "$RUNNER_TEMP/codemender-open.json" >/dev/null 2>&1; then
+            echo '[]' > "$RUNNER_TEMP/codemender-open.json"
+          fi
+          if ! cm stats --json > "$RUNNER_TEMP/codemender-stats.json" 2>/dev/null || ! jq -e '.' "$RUNNER_TEMP/codemender-stats.json" >/dev/null 2>&1; then
+            echo '{}' > "$RUNNER_TEMP/codemender-stats.json"
+          fi
 
-          jq --arg sev "$FIX_SEVERITIES" '
-            ($sev | ascii_upcase | split(",")) as $target_sevs
-            | [ (. // [])[]
-                | select((((.title // .Title) // "") | startswith("[LEGACY / UNTOUCHED]")) | not)
-                | select(((((.severity // .Severity) // "") | ascii_upcase) as $s | $target_sevs | index($s)))
-              ]
-            | sort_by(if (((.severity // .Severity) // "") | ascii_upcase) == "CRITICAL" then 0 else 1 end)
-          ' "$RUNNER_TEMP/codemender-open.json" > "$RUNNER_TEMP/target-findings.json"
-
-          # Normalize SARIF paths to relative repository paths for GitHub Code Scanning
-          jq --arg ws "${GITHUB_WORKSPACE}/" '
-            if .runs then
+          # Normalize SARIF artifact paths (strip workspace prefix & ensure startLine >= 1) for GitHub Code Scanning
+          if jq -e '.runs' "$RUNNER_TEMP/codemender.sarif" >/dev/null 2>&1; then
+            jq --arg ws "${GITHUB_WORKSPACE}/" '
               .runs[].results[]?.locations[]?.physicalLocation |= (
-                (.artifactLocation.uri |= (if startswith($ws) then ltrimstr($ws) else ltrimstr("/") end))
-                | (.region.startLine |= (if (. == null or . < 1) then 1 else . end))
+                if .artifactLocation.uri then
+                  .artifactLocation.uri |= (sub("^file://"; "") | sub("^" + $ws; "") | sub("^/"; ""))
+                else . end |
+                if (.region == null) or (.region.startLine == null) or (.region.startLine < 1) then
+                  .region = ((.region // {}) + {"startLine": 1})
+                else . end
               )
-            else . end
-          ' "$RUNNER_TEMP/codemender.sarif" > "$RUNNER_TEMP/codemender-norm.sarif" 2>/dev/null && \
-            mv "$RUNNER_TEMP/codemender-norm.sarif" "$RUNNER_TEMP/codemender.sarif" || true
+            ' "$RUNNER_TEMP/codemender.sarif" > "$RUNNER_TEMP/codemender-norm.sarif" && mv "$RUNNER_TEMP/codemender-norm.sarif" "$RUNNER_TEMP/codemender.sarif"
+          fi
 
-          TOTAL_HIGH_CRIT=$(jq 'length' "$RUNNER_TEMP/target-findings.json")
-          jq --argjson limit "$FIX_LIMIT" '.[:$limit]' "$RUNNER_TEMP/target-findings.json" > "$RUNNER_TEMP/to-fix.json"
-          FIX_COUNT=$(jq 'length' "$RUNNER_TEMP/to-fix.json")
+          TOTAL_OPEN=$(jq 'if type=="array" then length elif .findings then (.findings|length) else 0 end' "$RUNNER_TEMP/codemender-open.json" 2>/dev/null || echo 0)
+          HIGH_CRIT=$(jq --arg sevs "$FIX_SEVERITIES" '
+            ($sevs | split(",") | map(gsub("^\\s+|\\s+$";"") | ascii_upcase)) as $target |
+            (if type=="array" then . elif .findings then .findings else [] end) |
+            map(select(
+              ((((.severity // .Severity) // "") | ascii_upcase) as $s | ($target | index($s)) != null) and
+              ((((.title // .Title) // "") | startswith("[LEGACY / UNTOUCHED]") | not))
+            )) | length
+          ' "$RUNNER_TEMP/codemender-open.json" 2>/dev/null || echo 0)
 
-          echo "high_critical=$TOTAL_HIGH_CRIT" >> "$GITHUB_OUTPUT"
-          echo "fix_count=$FIX_COUNT" >> "$GITHUB_OUTPUT"
+          echo "total_open=$TOTAL_OPEN" >> "$GITHUB_OUTPUT"
+          echo "high_critical=$HIGH_CRIT" >> "$GITHUB_OUTPUT"
 
           {
-            echo "### 🛡️ CodeMender Security Report (\`${GITHUB_REPOSITORY}\` • \`$SCAN_MODE\` mode)"
-            echo "- **Target Severities (\`$FIX_SEVERITIES\`):** $TOTAL_HIGH_CRIT open finding(s)"
-            echo "- **Auto-Remediation Enabled:** \`$ENABLE_AUTOFIX\` (queued: $FIX_COUNT, limit: $FIX_LIMIT)"
+            echo "## 🛡️ CodeMender Security Scan Summary (\`$SCAN_MODE\`)"
             echo ""
-            if [ "$TOTAL_HIGH_CRIT" -gt 0 ]; then
-              echo "| Finding ID | Severity | Vulnerability | File |"
+            echo "| Metric | Value |"
+            echo "| :--- | :--- |"
+            echo "| **Repository** | \`$GITHUB_REPOSITORY\` |"
+            echo "| **Scan Path** | \`$SCAN_PATH\` |"
+            echo "| **Total Open Findings** | **$TOTAL_OPEN** |"
+            echo "| **Target Findings (\`$FIX_SEVERITIES\`)** | **$HIGH_CRIT** |"
+            echo ""
+            if [ "$TOTAL_OPEN" -gt 0 ]; then
+              echo "### 🔍 Open Findings"
+              echo "| ID | Severity | Title | Location |"
               echo "| :--- | :--- | :--- | :--- |"
-              jq -r '.[] | "| `\(.finding_id // .FindingID // .id)` | **\(.severity // .Severity)** | \(.title // .Title) | `\(.file_path // .FilePath // .location // "n/a")` |"' "$RUNNER_TEMP/target-findings.json"
-            else
-              echo "✅ No open \`$FIX_SEVERITIES\` vulnerabilities detected."
+              jq -r '
+                (if type=="array" then . elif .findings then .findings else [] end)[] |
+                [
+                  ((.id // .finding_id // .FindingID // "N/A") | tostring | gsub("\\|"; "\\|") | gsub("[\\r\\n]+"; " ")),
+                  ((.severity // .Severity // "UNKNOWN") | tostring | gsub("\\|"; "\\|") | gsub("[\\r\\n]+"; " ")),
+                  ((.title // .Title // .description // "Finding") | tostring | gsub("\\|"; "\\|") | gsub("[\\r\\n]+"; " ")),
+                  ((.file_path // .FilePath // .location // "N/A") | tostring | gsub("\\|"; "\\|") | gsub("[\\r\\n]+"; " "))
+                ] | "| `" + .[0] + "` | **" + .[1] + "** | " + .[2] + " | `" + .[3] + "` |"
+              ' "$RUNNER_TEMP/codemender-open.json" 2>/dev/null || true
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload SARIF v2.1.0 to GitHub Code Scanning
-        if: ${{ always() && env.UPLOAD_SARIF == 'true' && steps.scan.conclusion != 'skipped' }}
-        uses: github/codeql-action/upload-sarif@v3
+        if: ${{ always() && env.UPLOAD_SARIF == 'true' && steps.triage.outcome == 'success' }}
+        uses: github/codeql-action/upload-sarif@4bfa242aa49c5f7c6770b98670d354a7dfac05f8 # v3
+        continue-on-error: true
         with:
           sarif_file: ${{ runner.temp }}/codemender.sarif
           category: codemender-${{ inputs.scan_mode }}
-        continue-on-error: true
 
       - name: Autonomous Remediation (cm fix -> Atomic Commits)
-        id: fix
-        if: >-
-          env.ENABLE_AUTOFIX == 'true' &&
-          github.event_name != 'pull_request' &&
-          steps.triage.outputs.fix_count != '0' &&
-          steps.triage.outputs.fix_count != ''
+        id: autofix
+        if: ${{ env.ENABLE_AUTOFIX == 'true' && github.event_name != 'pull_request' && steps.triage.outputs.high_critical != '0' && steps.triage.outputs.high_critical != '' }}
         run: |
           set -uo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "CodeMender Security Bot"
+          git config user.email "codemender-bot@users.noreply.github.com"
 
-          jq -r '.[] | [(.finding_id // .FindingID // .id), (.severity // .Severity // "HIGH"), (.title // .Title // "Security vulnerability")] | @tsv' \
-            "$RUNNER_TEMP/to-fix.json" > "$RUNNER_TEMP/findings.tsv"
+          # Extract up to $FIX_LIMIT finding IDs matching $FIX_SEVERITIES (prioritizing CRITICAL, excluding untouched legacy findings)
+          jq -r --arg sevs "$FIX_SEVERITIES" --argjson limit "${FIX_LIMIT:-5}" '
+            ($sevs | split(",") | map(gsub("^\\s+|\\s+$";"") | ascii_upcase)) as $target |
+            (if type=="array" then . elif .findings then .findings else [] end) |
+            map(select(
+              ((((.severity // .Severity) // "") | ascii_upcase) as $s | ($target | index($s)) != null) and
+              ((((.title // .Title) // "") | startswith("[LEGACY / UNTOUCHED]") | not))
+            )) |
+            sort_by(if (((.severity // .Severity) // "") | ascii_upcase) == "CRITICAL" then 0 else 1 end) |
+            .[:$limit][] |
+            [
+              ((.id // .finding_id // .FindingID) | tostring | gsub("[\\r\\n\\t]+"; "")),
+              ((.severity // .Severity // "HIGH") | tostring | gsub("[\\r\\n\\t]+"; " ")),
+              ((.title // .Title // "Security Vulnerability") | tostring | gsub("[\\r\\n\\t]+"; " "))
+            ] | @tsv
+          ' "$RUNNER_TEMP/codemender-open.json" > "$RUNNER_TEMP/findings.tsv"
 
-          FIXED_SUMMARY=""
-          FIXED_SUCCESS=0
+          FIXED_COUNT=0
+          FIXED_LIST=""
 
           while IFS=$'\t' read -r FID FSEV FTITLE; do
             [ -z "$FID" ] && continue
-            echo "::group::Remediating [$FSEV] $FTITLE ($FID)"
-
-            if cm fix "$FID" --sandbox=false --yes --bypass-warning < /dev/null 2>&1 | tee "$RUNNER_TEMP/fix-$FID.log" && \
-               ! git diff --quiet; then
-              git add -u
-              git commit -m "fix(security): remediate $FTITLE [$FSEV]" -m "CodeMender Finding ID: $FID"
-              FIXED_SUCCESS=$((FIXED_SUCCESS + 1))
-              FIXED_SUMMARY="${FIXED_SUMMARY}- **[$FSEV]** \`$FID\`: $FTITLE"$'\n'
-              echo "✅ Successfully patched and committed $FID"
-            else
-              echo "::warning::CodeMender could not produce a clean patch for $FID ($FTITLE)."
+            if [[ ! "$FID" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
+              echo "::warning::Skipping finding ID with unexpected format: $FID"
+              continue
             fi
+            echo "================================================================="
+            echo "Attempting autonomous remediation for [$FSEV] $FID: $FTITLE"
+            echo "================================================================="
+            if cm fix "$FID" --sandbox=false --yes --bypass-warning < /dev/null; then
+              # Ensure temporary artifacts are never staged
+              git reset HEAD -- .cm_project .exploit 2>/dev/null || true
+              rm -rf .exploit 2>/dev/null || true
 
-            # Clean untracked temporary test/repro files before next iteration
-            git checkout HEAD -- .
-            git clean -fd
-            echo "::endgroup::"
+              if ! git diff --quiet || ! git diff --cached --quiet; then
+                git add -u
+                git reset HEAD -- .cm_project .exploit 2>/dev/null || true
+                git commit --no-verify -m "fix(security): remediate $FTITLE [$FSEV]" -m "CodeMender Finding ID: $FID"
+                FIXED_COUNT=$((FIXED_COUNT + 1))
+                FIXED_LIST="${FIXED_LIST}- **[\`${FSEV}\`]** \`${FID}\`: ${FTITLE}"$'\n'
+              fi
+              git checkout HEAD -- . 2>/dev/null || true
+              git clean -fd 2>/dev/null || true
+            else
+              echo "::warning::CodeMender could not auto-generate a verified patch for $FID; skipping."
+              git checkout HEAD -- . 2>/dev/null || true
+              git clean -fd 2>/dev/null || true
+            fi
           done < "$RUNNER_TEMP/findings.tsv"
 
-          echo "fixed_success=$FIXED_SUCCESS" >> "$GITHUB_OUTPUT"
+          # Refresh post-fix reports & token telemetry
+          cm report --format=sarif > "$RUNNER_TEMP/codemender.sarif" 2>/dev/null || true
+          cm stats --json > "$RUNNER_TEMP/codemender-stats.json" 2>/dev/null || true
+
+          echo "fixed_count=$FIXED_COUNT" >> "$GITHUB_OUTPUT"
           {
-            echo "fixed_summary<<__EOF__"
-            printf '%s' "$FIXED_SUMMARY"
-            echo "__EOF__"
+            echo "fixed_list<<EOF"
+            printf '%s' "$FIXED_LIST"
+            echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Export Append-Only FinOps Telemetry & SARIF to GCS (Optional)
-        if: ${{ always() && env.GCS_TELEMETRY_BUCKET != '' && steps.scan.conclusion != 'skipped' }}
+      - name: Archive Telemetry & SARIF to GCS (Append-Only WORM Audit Trail)
+        if: ${{ always() && env.GCS_TELEMETRY_BUCKET != '' && steps.triage.outcome == 'success' }}
         run: |
           set -uo pipefail
-          # Refresh stats.json to include token usage from cm fix sessions as well
-          cm stats --json > "$RUNNER_TEMP/codemender-stats.json" 2>/dev/null || true
-          DATE_PARTITION=$(date -u +"%Y/%m/%d")
-          RUN_TS=$(date -u +"%Y%m%dT%H%M%SZ")
-          REPORT_URI="gs://${GCS_TELEMETRY_BUCKET}/codemender-telemetry/${GITHUB_REPOSITORY}/${DATE_PARTITION}/${RUN_TS}-${GITHUB_RUN_ID}"
+          DATE_PATH=$(date -u +"%Y/%m/%d")
+          TS=$(date -u +"%Y%m%dT%H%M%SZ")
+          REPORT_URI="gs://${GCS_TELEMETRY_BUCKET}/codemender-telemetry/${GITHUB_REPOSITORY}/${DATE_PATH}/${TS}-${GITHUB_RUN_ID}"
+          echo "Archiving immutable SARIF & token telemetry to ${REPORT_URI}..."
+          gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender-open.json"  "${REPORT_URI}/findings-open.json" || echo "::warning::Failed to archive findings-open.json to GCS"
+          gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender.sarif"      "${REPORT_URI}/codemender.sarif"     || echo "::warning::Failed to archive codemender.sarif to GCS"
+          gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender-stats.json" "${REPORT_URI}/stats.json"          || echo "::warning::Failed to archive stats.json to GCS"
 
-          echo "Archiving append-only SARIF and token telemetry (no state.db sync) to ${REPORT_URI}/..."
-          gcloud storage cp "$RUNNER_TEMP/codemender-open.json"  "${REPORT_URI}/findings-open.json" || true
-          gcloud storage cp "$RUNNER_TEMP/codemender.sarif"      "${REPORT_URI}/codemender.sarif" || true
-          gcloud storage cp "$RUNNER_TEMP/codemender-stats.json" "${REPORT_URI}/stats.json" || true
-
-      - name: Upload Run Artifacts
-        if: ${{ always() && steps.scan.conclusion != 'skipped' }}
-        uses: actions/upload-artifact@v4
+      - name: Upload Reports as Workflow Artifacts
+        if: ${{ always() && steps.triage.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: codemender-artifacts-${{ inputs.scan_mode }}-${{ github.run_id }}
+          name: codemender-reports-${{ inputs.scan_mode }}-${{ github.run_id }}
           path: |
-            ${{ runner.temp }}/codemender-open.json
             ${{ runner.temp }}/codemender.sarif
+            ${{ runner.temp }}/codemender-open.json
             ${{ runner.temp }}/codemender-stats.json
-            ${{ runner.temp }}/cm-find.log
           retention-days: 30
-          if-no-files-found: warn
 
       - name: Open Autonomous Remediation Pull Request
-        if: >-
-          env.ENABLE_AUTOFIX == 'true' &&
-          github.event_name != 'pull_request' &&
-          steps.fix.outputs.fixed_success != '0' &&
-          steps.fix.outputs.fixed_success != ''
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          base: ${{ github.ref_name }}
-          branch: codemender/auto-remediation-${{ github.ref_name }}
-          delete-branch: true
-          title: "🛡️ CodeMender: Autonomous Security Remediation (${{ steps.fix.outputs.fixed_success }} fix(es))"
-          labels: |
-            security
-            codemender
-            automated-pr
-          body: |
-            ## 🛡️ CodeMender Autonomous Security Remediation
-
-            This Pull Request was automatically generated by the **CodeMender Asynchronous Security Pipeline** (`${{ inputs.scan_mode }}` mode).
-
-            ### 📊 Scan & Remediation Summary
-            - **Repository:** `${{ github.repository }}` (branch: `${{ github.ref_name }}`)
-            - **Open Target Findings (`${{ inputs.fix_severities }}`):** ${{ steps.triage.outputs.high_critical }}
-            - **Successfully Patched in this PR:** ${{ steps.fix.outputs.fixed_success }}
-
-            ### 🔧 Remediated Vulnerabilities (1 Atomic Commit per Finding)
-            ${{ steps.fix.outputs.fixed_summary }}
-
-            ---
-            > **Reviewer Guidance:** Each vulnerability fix is isolated in its own Git commit so your team can review, cherry-pick, or revert individual fixes cleanly. Full SARIF v2.1.0 and JSON telemetry reports are attached to [Workflow Run #${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
-
-      - name: Evaluate Security Gate
-        if: ${{ always() && env.ENFORCE_GATE == 'true' }}
+        if: ${{ env.ENABLE_AUTOFIX == 'true' && github.event_name != 'pull_request' && steps.autofix.outputs.fixed_count != '0' && steps.autofix.outputs.fixed_count != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.pr_token || github.token }}
+          FIXED_COUNT: ${{ steps.autofix.outputs.fixed_count }}
+          FIXED_LIST: ${{ steps.autofix.outputs.fixed_list }}
         run: |
           set -euo pipefail
-          if [ "${{ steps.triage.outcome }}" != "success" ]; then
-            echo "::error title=Security Gate Failed::CodeMender scan/triage did not complete successfully."
+          PR_BRANCH="codemender/remediate-${GITHUB_REF_NAME}"
+          BASE_BRANCH="${GITHUB_REF_NAME}"
+          PR_TITLE="fix(security): CodeMender autonomous remediation (${FIXED_COUNT} finding(s))"
+
+          cat <<EOF > "$RUNNER_TEMP/pr-body.md"
+          ## 🛡️ Google Cloud CodeMender — Autonomous Security Remediation
+
+          This Pull Request was automatically generated and validated by **CodeMender** during the \`${SCAN_MODE}\` security pipeline.
+          Each remediated vulnerability is isolated in its own **atomic Git commit** for granular code review and revertability.
+
+          ### ✅ Remediated Findings (${FIXED_COUNT})
+          ${FIXED_LIST}
+
+          ---
+          ### 🔍 Reviewer Checklist
+          1. Review each atomic commit in the **Commits** tab to inspect the vulnerability-specific patch.
+          2. Verify that all CI unit/integration tests pass on this Pull Request.
+          3. Merge using **Merge Commit** or **Rebase and Merge** to preserve atomic commit history, or **Squash** per team policy.
+
+          *Workflow Run: [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})*
+          EOF
+
+          # Push atomic commits to the remediation branch using the configured token
+          git checkout -B "$PR_BRANCH"
+          REMOTE_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force "$REMOTE_URL" "HEAD:refs/heads/${PR_BRANCH}"
+
+          # Create or update the Pull Request via official GitHub CLI (`gh`)
+          EXISTING_PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$PR_BRANCH" --base "$BASE_BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr edit "$EXISTING_PR" --repo "$GITHUB_REPOSITORY" --title "$PR_TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
+            echo "Updated existing Remediation Pull Request #${EXISTING_PR}"
+          else
+            PR_URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --head "$PR_BRANCH" --base "$BASE_BRANCH" --title "$PR_TITLE" --body-file "$RUNNER_TEMP/pr-body.md")
+            echo "Created Remediation Pull Request: ${PR_URL}"
+            gh label create "security" --repo "$GITHUB_REPOSITORY" --color "d73a4a" --description "Security remediation" --force >/dev/null 2>&1 || true
+            gh label create "codemender" --repo "$GITHUB_REPOSITORY" --color "0075ca" --description "Automated CodeMender patch" --force >/dev/null 2>&1 || true
+            gh pr edit "$PR_URL" --repo "$GITHUB_REPOSITORY" --add-label "security,codemender" >/dev/null 2>&1 || true
+          fi
+
+      - name: Evaluate Security Gate (Fail-Closed)
+        if: ${{ always() && env.ENFORCE_GATE == 'true' }}
+        env:
+          SCAN_EXIT_CODE: ${{ steps.scan.outputs.scan_exit_code || '1' }}
+          TRIAGE_OUTCOME: ${{ steps.triage.outcome }}
+          HIGH_CRITICAL_COUNT: ${{ steps.triage.outputs.high_critical || '0' }}
+        run: |
+          set -euo pipefail
+          if [ "$SCAN_EXIT_CODE" != "0" ] || [ "$TRIAGE_OUTCOME" != "success" ]; then
+            echo "::error title=Security Gate Failed (Fail-Closed)::CodeMender scan (exit=$SCAN_EXIT_CODE) or triage ($TRIAGE_OUTCOME) did not complete cleanly."
             exit 1
           fi
-          COUNT="${{ steps.triage.outputs.high_critical || '0' }}"
-          if [ "$COUNT" -gt 0 ]; then
-            echo "::error title=Security Gate Blocked::CodeMender detected $COUNT open $FIX_SEVERITIES finding(s)."
+          if [ "$HIGH_CRITICAL_COUNT" -gt 0 ]; then
+            echo "::error title=Security Gate Blocked::CodeMender detected $HIGH_CRITICAL_COUNT open $FIX_SEVERITIES finding(s)."
             exit 1
           fi
           echo "✅ Security gate passed (0 open $FIX_SEVERITIES findings)."
+
+      - name: Shred Temporary WIF Credentials
+        if: ${{ always() }}
+        run: |
+          rm -f "$RUNNER_TEMP/gcp-creds.json" "$HOME/.config/gcloud/application_default_credentials.json" 2>/dev/null || true

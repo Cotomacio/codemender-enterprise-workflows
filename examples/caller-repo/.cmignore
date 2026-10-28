@@ -6,7 +6,10 @@
 # from `cm find`, reducing scan latency and Vertex AI token consumption.
 # =============================================================================
 
-# Dependency & Build Directories
+# Dependency, VCS & Local Tooling Directories
+.git/
+.cm_project/
+.exploit/
 node_modules/
 vendor/
 target/
@@ -18,6 +21,7 @@ out/
 .venv/
 venv/
 __pycache__/
+*.sarif
 
 # Unit / Integration Test Suites & Mock Data
 **/test/**
@@ -56,5 +60,6 @@ docs/
 *.min.js
 *.bundle.js
 *.map
+# Note: Remove `*.sql` below if your repository contains PL/SQL stored procedures or dynamic SQL templates requiring security analysis.
 *.sql
 *.md
