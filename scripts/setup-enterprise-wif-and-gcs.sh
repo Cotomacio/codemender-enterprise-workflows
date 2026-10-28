@@ -3,9 +3,12 @@
 # CodeMender Enterprise Bootstrap: GCP Service Account + WIF + WORM GCS Bucket
 # =============================================================================
 # Provisions the Google Cloud infrastructure required to run the CodeMender
-# Reusable GitHub Actions Workflow across an entire GitHub Organization (100+
-# repositories) with Zero-Trust OIDC binding and append-only audit storage:
-#   1. Enables Vertex AI, IAM Credentials, STS, and Cloud Storage APIs.
+# Reusable GitHub Actions Workflow across a GitHub Organization with Zero-Trust
+# OIDC binding and append-only audit storage:
+#   0. Runs pre-flight checks for CLI tools, active authentication, and required
+#      operator IAM permissions.
+#   1. Enables Gemini Enterprise (`aiplatform.googleapis.com` for backward-compatible
+#      SDK endpoints), IAM Credentials, STS, and Cloud Storage APIs.
 #   2. Creates the dedicated `codemender-ci` Service Account.
 #   3. Grants `roles/aiplatform.user` and `roles/serviceusage.serviceUsageConsumer`.
 #   4. Creates a hardened GCS Bucket (`--uniform-bucket-level-access`,
@@ -15,6 +18,14 @@
 #   5. Creates/updates an Organization-wide Workload Identity Pool & OIDC Provider
 #      with `assertion.job_workflow_ref` enforcement so ONLY jobs executing the
 #      central reusable workflow can impersonate the Service Account.
+#
+# Required Operator IAM Roles (on $PROJECT_ID):
+#   - roles/serviceusage.serviceUsageAdmin       (Enable Google Cloud APIs)
+#   - roles/iam.serviceAccountAdmin              (Create Service Account & bind WIF policy)
+#   - roles/iam.workloadIdentityPoolAdmin        (Create Workload Identity Pool & OIDC Provider)
+#   - roles/resourcemanager.projectIamAdmin      (Bind project-level IAM roles to the SA)
+#   - roles/storage.admin                        (Create hardened GCS bucket & bind bucket IAM)
+#   (Or roles/owner on $PROJECT_ID)
 #
 # Usage:
 #   export PROJECT_ID="your-gcp-project-id"
@@ -37,7 +48,39 @@ KMS_KEY_NAME="${KMS_KEY_NAME:-}"
 
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-echo "==> [1/6] Enabling required Google Cloud APIs on project ${PROJECT_ID}..."
+echo "==> [0/6] Running Pre-Flight Operator & Permission Checks..."
+if ! command -v gcloud >/dev/null 2>&1; then
+  echo "ERROR: Google Cloud CLI ('gcloud') is not installed or not in PATH." >&2
+  exit 1
+fi
+
+ACTIVE_ACCOUNT=$(gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null || true)
+if [ -z "${ACTIVE_ACCOUNT}" ]; then
+  echo "ERROR: No active gcloud account found. Run 'gcloud auth login' before executing this script." >&2
+  exit 1
+fi
+
+cat <<EOF
+  Active Operator Identity : ${ACTIVE_ACCOUNT}
+  Target GCP Project       : ${PROJECT_ID}
+  Required Operator Roles  :
+    - roles/serviceusage.serviceUsageAdmin
+    - roles/iam.serviceAccountAdmin
+    - roles/iam.workloadIdentityPoolAdmin
+    - roles/resourcemanager.projectIamAdmin
+    - roles/storage.admin
+EOF
+
+if ! gcloud projects describe "${PROJECT_ID}" >/dev/null 2>&1; then
+  echo "ERROR: Unable to access project '${PROJECT_ID}' as '${ACTIVE_ACCOUNT}'." >&2
+  echo "       Verify that '${PROJECT_ID}' exists, your gcloud session is fresh ('gcloud auth login')," >&2
+  echo "       and '${ACTIVE_ACCOUNT}' holds the required IAM roles listed above." >&2
+  exit 1
+fi
+echo "  Pre-flight check passed."
+
+echo "==> [1/6] Enabling required Google Cloud APIs (Gemini Enterprise, IAM, STS, Storage) on project ${PROJECT_ID}..."
+# Note: Gemini Enterprise retains the 'aiplatform.googleapis.com' endpoint identifier for SDK backward compatibility.
 gcloud services enable \
   aiplatform.googleapis.com \
   iam.googleapis.com \
@@ -55,7 +98,7 @@ if ! gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJECT_ID}
     --display-name="CodeMender Enterprise CI/CD Runner"
 fi
 
-echo "==> [3/6] Granting Vertex AI & Service Usage roles to ${SA_EMAIL}..."
+echo "==> [3/6] Granting Gemini Enterprise (roles/aiplatform.user) & Service Usage roles to ${SA_EMAIL}..."
 for ROLE in "roles/aiplatform.user" "roles/serviceusage.serviceUsageConsumer"; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
@@ -161,7 +204,7 @@ gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
 cat <<EOF
 
 ================================================================================
-✅ CodeMender Enterprise GCP Bootstrap Complete! (Regulated Zero-Trust Mode)
+✅ CodeMender Enterprise GCP Bootstrap Complete! (Zero-Trust Mode)
 ================================================================================
 Configure the following GitHub Organization Variables (Settings -> Secrets and
 variables -> Actions -> Variables -> New organization variable):

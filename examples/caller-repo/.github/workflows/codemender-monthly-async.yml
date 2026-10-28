@@ -8,9 +8,8 @@ name: CodeMender — Monthly Deep Audit & Autonomous Remediation
 # automated Pull Request (`cm fix`) for up to 5 CRITICAL/HIGH findings.
 #
 # Supply-Chain Governance Note:
-#   For regulated production environments (PCI-DSS v4.0 / SOC 2 / SLSA), pin
-#   `uses:` below to an immutable release tag (e.g., `@v1.0.0`) or 40-char
-#   commit SHA instead of `@main`.
+#   For production environments, pin `uses:` below to an immutable release tag
+#   (e.g., `@v1.0.0`) or 40-char commit SHA instead of `@main`.
 # =============================================================================
 
 on:

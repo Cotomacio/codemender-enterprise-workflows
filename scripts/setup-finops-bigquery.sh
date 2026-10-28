@@ -4,15 +4,23 @@
 # =============================================================================
 # Provisions a serverless BigQuery FinOps analytics layer directly over the
 # append-only GCS telemetry bucket (`gs://<bucket>/codemender-finops-jsonl/*.jsonl`):
+#   0. Runs pre-flight checks for CLI tools, active authentication, and required
+#      operator IAM permissions.
 #   1. Enables the BigQuery API (`bigquery.googleapis.com`).
 #   2. Creates the `codemender_finops` BigQuery dataset.
 #   3. Creates an External Table (`codemender_finops.scan_telemetry`) backed by
 #      Newline-Delimited JSON (`.jsonl`) files in Cloud Storage — zero ETL required.
 #   4. Creates two analytical Views for Looker Studio & FinOps chargeback:
-#      - `v_repository_finops_summary`: Per-team/repository token, latency,
-#        vulnerability remediation, and estimated USD cost rollups.
+#      - `v_repository_finops_summary`: Per-team/repository Gemini Enterprise
+#        token, latency, vulnerability remediation, and estimated USD cost rollups.
 #      - `v_command_bucket_breakdown`: Granular breakdown comparing `find` vs.
 #        `fix` token consumption across repositories.
+#
+# Required Operator IAM Roles (on $PROJECT_ID and gs://$TELEMETRY_BUCKET):
+#   - roles/serviceusage.serviceUsageAdmin       (Enable bigquery.googleapis.com, if needed)
+#   - roles/bigquery.dataEditor                  (Or roles/bigquery.admin — create dataset/tables/views)
+#   - roles/bigquery.jobUser                     (Run BigQuery DDL and analytical queries)
+#   - roles/storage.objectViewer                 (Read gs://$TELEMETRY_BUCKET/codemender-finops-jsonl/*.jsonl)
 #
 # Usage:
 #   export PROJECT_ID="codemender-latam"
@@ -21,19 +29,47 @@
 # =============================================================================
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-codemender-latam}"
-TELEMETRY_BUCKET="${TELEMETRY_BUCKET:-${PROJECT_ID}-codemender-telemetry}"
-BQ_DATASET="${BQ_DATASET:-codemender_finops}"
-BQ_LOCATION="${BQ_LOCATION:-US}"
+PROJECT_ID="${1:-${PROJECT_ID:-codemender-latam}}"
+TELEMETRY_BUCKET="${2:-${TELEMETRY_BUCKET:-${PROJECT_ID}-codemender-telemetry}}"
+BQ_DATASET="${3:-${BQ_DATASET:-codemender_finops}}"
+BQ_LOCATION="${4:-${BQ_LOCATION:-US}}"
+
+echo "==> [0/4] Running Pre-Flight Operator & Permission Checks..."
+for CMD in gcloud bq; do
+  if ! command -v "${CMD}" >/dev/null 2>&1; then
+    echo "ERROR: Required CLI tool '${CMD}' is not installed or not in PATH." >&2
+    exit 1
+  fi
+done
+
+ACTIVE_ACCOUNT=$(gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null || true)
+cat <<EOF
+  Active Operator Identity : ${ACTIVE_ACCOUNT:-default-credentials}
+  Target GCP Project       : ${PROJECT_ID}
+  Target GCS Bucket        : gs://${TELEMETRY_BUCKET}
+  Target BigQuery Dataset  : ${PROJECT_ID}:${BQ_DATASET} (${BQ_LOCATION})
+  Required Operator Roles  :
+    - roles/serviceusage.serviceUsageAdmin (if BigQuery API is not yet enabled)
+    - roles/bigquery.dataEditor (or roles/bigquery.admin) + roles/bigquery.jobUser
+    - roles/storage.objectViewer on gs://${TELEMETRY_BUCKET}
+EOF
+
+if ! bq ls --project_id="${PROJECT_ID}" >/dev/null 2>&1; then
+  echo "ERROR: Unable to access BigQuery on project '${PROJECT_ID}'." >&2
+  echo "       Verify that your credentials are active ('gcloud auth login') and that your" >&2
+  echo "       principal holds roles/bigquery.jobUser and roles/bigquery.dataEditor on '${PROJECT_ID}'." >&2
+  exit 1
+fi
+echo "  Pre-flight check passed."
 
 echo "==> [1/4] Enabling BigQuery API on ${PROJECT_ID}..."
-gcloud services enable bigquery.googleapis.com --project="${PROJECT_ID}"
+gcloud services enable bigquery.googleapis.com --project="${PROJECT_ID}" >/dev/null 2>&1 || true
 
 echo "==> [2/4] Creating BigQuery Dataset ${PROJECT_ID}:${BQ_DATASET} (${BQ_LOCATION})..."
 if ! bq --project_id="${PROJECT_ID}" show --dataset "${PROJECT_ID}:${BQ_DATASET}" >/dev/null 2>&1; then
   bq --location="${BQ_LOCATION}" --project_id="${PROJECT_ID}" mk \
     --dataset \
-    --description="CodeMender Enterprise DevSecOps & FinOps Telemetry" \
+    --description="CodeMender Enterprise DevSecOps & Gemini Enterprise FinOps Telemetry" \
     "${PROJECT_ID}:${BQ_DATASET}"
 fi
 

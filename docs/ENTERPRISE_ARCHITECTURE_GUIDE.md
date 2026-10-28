@@ -1,8 +1,7 @@
-# 🛡️ Google Cloud CodeMender — Enterprise DevSecOps Reference Architecture & Regulated-Industry Onboarding Guide
+# 🛡️ Google Cloud CodeMender — Enterprise DevSecOps Reference Architecture & Customer Onboarding Guide
 
-**Target Audience:** CISOs, Enterprise Cloud & Security Architects, DevSecOps Platform Teams, Application Engineering Leads, and External Compliance Auditors  
-**Architecture Pattern:** Hub-and-Spoke GitHub Actions Reusable Workflow (`workflow_call`) + 100% Stateless Runner + Zero-Trust Keyless GCP WIF (`job_workflow_ref` Bound) + Native SARIF v2.1.0 + Autonomous Remediation PRs + WORM Append-Only FinOps Telemetry  
-**Compliance Alignment:** PCI-DSS v4.0, SOC 2 Type II, ISO/IEC 27001:2022, NIST SP 800-218 (SSDF v1.1), CIS GitHub & GCP Benchmarks, SLSA Build L2, SEC Rule 17a-4, DORA, BACEN Res. 4.893  
+**Target Audience:** Enterprise Cloud & Security Architects, DevSecOps Platform Teams, and Application Engineering Leads  
+**Architecture Pattern:** Hub-and-Spoke GitHub Actions Reusable Workflow (`workflow_call`) + 100% Stateless Runner + Zero-Trust Keyless GCP WIF (`job_workflow_ref` Bound) + Native SARIF v2.1.0 + Autonomous Remediation PRs + Append-Only FinOps Telemetry  
 **Live Reference Repositories:**
 - **Central Governance Hub:** [`Cotomacio/codemender-enterprise-workflows`](https://github.com/Cotomacio/codemender-enterprise-workflows)
 - **Sample Consumer Repository (Team A — Payments):** [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments)
@@ -12,18 +11,18 @@
 
 ## Executive Summary
 
-When rolling out AI-powered vulnerability detection and autonomous code remediation (**Google Cloud CodeMender CLI — `cm`**) across **100+ to 1,000+ application repositories** in highly regulated enterprises (banking, financial services, healthcare, telecommunications, and critical infrastructure), copying complex CI/CD scripts into every repository creates severe governance, security, and maintenance debt.
+When rolling out AI-powered vulnerability detection and autonomous code remediation (**Google Cloud CodeMender CLI — `cm`**) across multiple application repositories in an enterprise organization, copying complex CI/CD scripts into every repository creates governance, security, and maintenance debt.
 
-This guide documents a production-verified, **Regulated-Industry Hub-and-Spoke DevSecOps Reference Architecture** where:
+This guide documents a production-verified **Hub-and-Spoke DevSecOps Reference Architecture** checked against enterprise DevSecOps engineering practices where:
 1. **The Central AppSec / Platform Team** maintains a **single reusable workflow repository** (`codemender-enterprise-workflows`) hardened against script injection, tag hijacking, lateral OIDC token minting, and fail-open errors.
 2. **Application Teams (Team A, Team B, ... Team N)** onboard in **under 5 minutes** by dropping lightweight, declarative YAML caller files (`~40 lines` with explicit least-privilege `permissions:`) and a `.cmignore` policy into their repository—with **zero secrets, zero JSON service account keys, and zero bash scripts** to maintain.
 3. **Every execution is 100% Stateless, Fail-Closed, and Zero-Trust:**
-   - **For AppSec & Risk Governance:** Vulnerability lifecycle, deduplication, and triage happen natively via **SARIF v2.1.0** in **GitHub Code Scanning** (or downstream ASPM tools such as DefectDojo, Wiz, or Security Command Center), while immutable audit artifacts are archived with `--no-clobber` to a WORM-capable Google Cloud Storage bucket (`roles/storage.objectCreator`).
-   - **For Application Developers:** CodeMender autonomously generates and validates patches (`cm fix`) and uses the official GitHub CLI (`gh pr`) to open a **Pull Request with 1 atomic Git commit per remediated vulnerability** for standard human code review.
+   - **For AppSec & DevSecOps Governance:** Vulnerability lifecycle, deduplication, and triage happen natively via **SARIF v2.1.0** in **GitHub Code Scanning** (or downstream ASPM tools such as **Wiz** or DefectDojo), while immutable telemetry and SARIF artifacts are archived with `--no-clobber` to an append-only Google Cloud Storage bucket (`roles/storage.objectCreator`).
+   - **For Application Developers:** CodeMender autonomously generates and validates patches (`cm fix`) powered by **Gemini Enterprise** and uses the official GitHub CLI (`gh pr`) to open a **Pull Request with 1 atomic Git commit per remediated vulnerability** for standard human code review.
 
 > [!IMPORTANT]
 > **Why Stateless Runners?**  
-> CodeMender maintains a local SQLite database (`.cm_project/state.db`) during execution. Synchronizing a binary SQLite file across concurrent ephemeral CI runners via object storage introduces race conditions and state corruption. By treating every runner as **100% stateless** and exporting **SARIF v2.1.0 + Automated PRs + Append-Only GCS Telemetry** inside the same ephemeral job, this architecture scales horizontally to thousands of repositories with zero locking or state contention.
+> CodeMender maintains a local SQLite database (`.cm_project/state.db`) during execution. Synchronizing a binary SQLite file across concurrent ephemeral CI runners via object storage introduces race conditions and state corruption. By treating every runner as **100% stateless** and exporting **SARIF v2.1.0 + Automated PRs + Append-Only GCS Telemetry** inside the same ephemeral job, this architecture scales horizontally across all repositories in an organization with zero locking or state contention.
 
 ---
 
@@ -33,40 +32,40 @@ This guide documents a production-verified, **Regulated-Industry Hub-and-Spoke D
 
 ```mermaid
 flowchart TB
-    subgraph GH_ORG["GitHub Organization (100+ to 1,000+ Repositories)"]
+    subgraph GH_ORG["GitHub Organization (Application Repositories)"]
         direction TB
-        ORG_VARS["🔐 GitHub Organization Variables\n• GCP_QUOTA_PROJECT\n• GCP_WIF_PROVIDER\n• GCP_SA_EMAIL\n• GCP_TELEMETRY_BUCKET"]
+        ORG_VARS["GitHub Organization Variables<br/>- GCP_QUOTA_PROJECT<br/>- GCP_WIF_PROVIDER<br/>- GCP_SA_EMAIL<br/>- GCP_TELEMETRY_BUCKET"]
 
         subgraph SPOKES["Application Team Repositories (Consumers / Spokes)"]
-            TEAM_A["📦 Team A: team-a-payments\n• codemender-monthly-async.yml (write)\n• codemender-pr-gate.yml (read-only)\n• .cmignore"]
-            TEAM_B["📦 Team B: team-b-checkout\n• codemender-monthly-async.yml (write)\n• codemender-pr-gate.yml (read-only)\n• .cmignore"]
-            TEAM_N["📦 Team N: 100+ Microservices\n• codemender-monthly-async.yml (write)\n• codemender-pr-gate.yml (read-only)\n• .cmignore"]
+            TEAM_A["Team A: team-a-payments<br/>- codemender-monthly-async.yml (write)<br/>- codemender-pr-gate.yml (read-only)<br/>- .cmignore"]
+            TEAM_B["Team B: team-b-checkout<br/>- codemender-monthly-async.yml (write)<br/>- codemender-pr-gate.yml (read-only)<br/>- .cmignore"]
+            TEAM_N["Team N: Additional Microservices<br/>- codemender-monthly-async.yml (write)<br/>- codemender-pr-gate.yml (read-only)<br/>- .cmignore"]
         end
 
         subgraph HUB["Central DevSecOps Repository (Hub)"]
-            REUSABLE["🛡️ codemender-enterprise-workflows\n.github/workflows/codemender-reusable.yml\n(workflow_call • SHA-Pinned • Fail-Closed)"]
+            REUSABLE["codemender-enterprise-workflows<br/>.github/workflows/codemender-reusable.yml<br/>(workflow_call - SHA-Pinned - Fail-Closed)"]
         end
 
         subgraph OUTPUTS["Developer & AppSec Native Outputs (Per Repo)"]
-            SARIF_OUT["📊 GitHub Code Scanning\n(SARIF v2.1.0 Alerts & Deduplication)"]
-            AUTO_PR["🔀 Automated Pull Request (gh CLI)\n(1 Atomic Commit per Fixed Vulnerability)"]
+            SARIF_OUT["GitHub Code Scanning / Wiz<br/>(SARIF v2.1.0 Alerts & Deduplication)"]
+            AUTO_PR["Automated Pull Request (gh CLI)<br/>(1 Atomic Commit per Fixed Vulnerability)"]
         end
     end
 
     subgraph GCP["Google Cloud Platform (Central Governance Project: codemender-latam)"]
-        WIF["🔑 Workload Identity Federation\nPool: github-org-pool / Provider: codemender-oidc\nCondition: repository_owner AND job_workflow_ref"]
-        SA["👤 Service Account\ncodemender-ci@...\n(aiplatform.user + storage.objectCreator)"]
-        AR["📦 Artifact Registry\ncmoc-prod/codemender-cli-production\n(cm-linux-amd64.zip + SHA-256 Audit)"]
-        VERTEX["🧠 Vertex AI / Gemini Models\nCodeMender Engine\n(cm find & cm fix)"]
-        GCS["🪣 Cloud Storage WORM Audit Bucket\ngs://...-codemender-telemetry\n(objectCreator + 365d Retention + Public Access Prevention)"]
+        WIF["Workload Identity Federation<br/>Pool: github-org-pool / Provider: codemender-oidc<br/>Condition: repository_owner AND job_workflow_ref"]
+        SA["Service Account<br/>codemender-ci@...<br/>(aiplatform.user + storage.objectCreator)"]
+        AR["Artifact Registry<br/>cmoc-prod/codemender-cli-production<br/>(cm-linux-amd64.zip + SHA-256 Check)"]
+        GEMINI["Gemini Enterprise<br/>CodeMender Engine<br/>(cm find & cm fix)"]
+        GCS["Cloud Storage WORM Telemetry Bucket<br/>gs://...-codemender-telemetry<br/>(objectCreator + 365d Retention + BigQuery External Table)"]
     end
 
     ORG_VARS -.->|"Inherited by"| SPOKES
     TEAM_A & TEAM_B & TEAM_N ==>|"uses: workflow_call"| REUSABLE
-    REUSABLE -->|"1. Keyless OIDC Token\n(Verified job_workflow_ref)"| WIF
+    REUSABLE -->|"1. Keyless OIDC Token"| WIF
     WIF -->|"2. Short-Lived Impersonation"| SA
     REUSABLE -->|"3. HTTPS Download + SHA-256 Check"| AR
-    SA -->|"4. AI Deep / Diff Scan & Patch"| VERTEX
+    SA -->|"4. AI Deep / Diff Scan & Patch"| GEMINI
     REUSABLE -->|"5a. Upload Normalized SARIF"| SARIF_OUT
     REUSABLE -->|"5b. Push Atomic Commits & Open PR"| AUTO_PR
     SA -->|"5c. Append-Only Upload (--no-clobber)"| GCS
@@ -79,38 +78,38 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Trigger as Schedule (Cron) / PR / Dispatch
-    participant Spoke as Consumer Repo (team-a-payments)
+    actor Trigger as Schedule / PR / Dispatch
+    participant Spoke as Consumer Repo
     participant Hub as Central Reusable Workflow
-    participant GCP as GCP (Zero-Trust WIF + Vertex AI + GCS)
+    participant GCP as GCP (WIF + Gemini Enterprise + GCS)
     participant GH as GitHub (Code Scanning & PRs)
 
     Trigger->>Spoke: Trigger workflow (monthly cron, PR, or manual dispatch)
-    Spoke->>Hub: Invoke workflow_call with Org Variables & least-privilege permissions
-    Hub->>Hub: Validate inputs (zero script injection) & apply deterministic cron jitter
+    Spoke->>Hub: Invoke workflow_call with Org Variables and least-privilege permissions
+    Hub->>Hub: Validate inputs (zero script injection) and apply deterministic cron jitter
     Hub->>GCP: Exchange GitHub OIDC JWT via WIF (enforcing assertion.job_workflow_ref)
-    GCP-->>Hub: Return short-lived token (relocated to $RUNNER_TEMP/gcp-creds.json)
-    Hub->>GCP: Download cm CLI binary & log/verify SHA-256 digest
-    Hub->>Hub: Purge untrusted .cm_project/.codemender, update .git/info/exclude & run cm init + cm health
-    Hub->>GCP: Execute cm find (--deep-workers or --diff-workers) & capture PIPESTATUS[0]
-    GCP-->>Hub: Populate ephemeral .cm_project/state.db with findings & token stats
-    Hub->>Hub: Export SARIF v2.1.0, OPEN findings JSON & stats.json; normalize SARIF URIs
+    GCP-->>Hub: Return short-lived token (relocated to RUNNER_TEMP/gcp-creds.json)
+    Hub->>GCP: Download cm CLI binary and verify SHA-256 digest
+    Hub->>Hub: Purge untrusted .cm_project/.codemender, update .git/info/exclude and run cm init + cm health
+    Hub->>GCP: Execute cm find (--deep-workers or --diff-workers) and capture exit status
+    GCP-->>Hub: Populate ephemeral .cm_project/state.db with findings and token stats
+    Hub->>Hub: Export SARIF v2.1.0, OPEN findings JSON, stats.json and normalize SARIF URIs
     Hub->>GH: Upload SARIF v2.1.0 to GitHub Code Scanning
-    alt enable_autofix == true AND target findings > 0
-        loop For each target finding (up to fix_limit)
-            Hub->>GCP: Execute cm fix <FINDING_ID> --sandbox=false --yes
-            GCP-->>Hub: Generate & validate security patch
-            Hub->>Hub: git commit --no-verify -m "fix(security): remediate <Title> [<Severity>]"
+    alt When enable_autofix is true and target findings exist
+        loop For each target finding up to fix_limit
+            Hub->>GCP: Execute cm fix FINDING_ID --sandbox=false --yes
+            GCP-->>Hub: Generate and validate security patch via Gemini Enterprise
+            Hub->>Hub: Create atomic git commit (--no-verify) for remediated finding
         end
-        Hub->>GH: Push branch & create/update PR via gh CLI (codemender/remediate-main)
+        Hub->>GH: Push branch and create or update PR via gh CLI (codemender/remediate-main)
     end
-    opt gcp_telemetry_bucket is configured
-        Hub->>GCP: Archive SARIF, findings-open.json & stats.json to GCS (--no-clobber)
+    opt When gcp_telemetry_bucket is configured
+        Hub->>GCP: Archive SARIF, findings-open.json, stats.json and telemetry.jsonl to GCS (--no-clobber)
     end
-    opt enforce_gate == true (PR Security Gate — Fail-Closed)
-        Hub->>Hub: Fail job (exit 1) if scan_exit_code != 0 OR open CRITICAL/HIGH > 0
+    opt When enforce_gate is true (PR Security Gate - Fail-Closed)
+        Hub->>Hub: Fail job (exit 1) if scan failed or open CRITICAL/HIGH findings remain
     end
-    Hub->>Hub: Always shred temporary WIF credentials ($RUNNER_TEMP/gcp-creds.json)
+    Hub->>Hub: Always shred temporary WIF credentials (RUNNER_TEMP/gcp-creds.json)
 ```
 
 ---
@@ -121,28 +120,36 @@ sequenceDiagram
 
 The Platform / Cloud Security team provisions **one** central Google Cloud project (in our working implementation, `codemender-latam`, Project Number `353807816023`) that acts as the billing, quota, and telemetry hub for all repositories in the GitHub Organization.
 
-#### 1.1 Automated Bootstrap Script
-The repository includes [`scripts/setup-enterprise-wif-and-gcs.sh`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/scripts/setup-enterprise-wif-and-gcs.sh), which automates all 6 provisioning steps with regulated-enterprise security controls:
+#### 1.1 Required Operator Permissions (Pre-Flight Checked Automatically)
+Before running [`scripts/setup-enterprise-wif-and-gcs.sh`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/scripts/setup-enterprise-wif-and-gcs.sh), ensure the administrator executing the script holds the following IAM roles on `$PROJECT_ID` (verified by the script's `[0/6]` pre-flight check):
+- `roles/serviceusage.serviceUsageAdmin` — Enable Google Cloud APIs.
+- `roles/iam.serviceAccountAdmin` — Create the `codemender-ci` Service Account and bind WIF impersonation policy.
+- `roles/iam.workloadIdentityPoolAdmin` — Create and configure the Workload Identity Pool and OIDC Provider.
+- `roles/resourcemanager.projectIamAdmin` — Grant project-level IAM roles to the Service Account.
+- `roles/storage.admin` — Create the WORM GCS telemetry bucket and bind bucket-level `roles/storage.objectCreator`.
+
+#### 1.2 Automated Bootstrap Script
+Run [`scripts/setup-enterprise-wif-and-gcs.sh`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/scripts/setup-enterprise-wif-and-gcs.sh) to automate all 6 provisioning steps:
 
 ```bash
 export PROJECT_ID="codemender-latam"
 export GITHUB_ORG="Cotomacio"
 export HUB_REPO="codemender-enterprise-workflows"
-export RETENTION_PERIOD="365d"   # 1-year WORM audit retention (PCI-DSS Req 10.7 / SOC 2)
+export RETENTION_PERIOD="365d"   # 1-year WORM audit retention
 ./scripts/setup-enterprise-wif-and-gcs.sh
 ```
 
-#### 1.2 What the Bootstrap Configures Under the Hood
+#### 1.3 What the Bootstrap Configures Under the Hood
 
 1. **Google Cloud APIs Enabled:**
-   - `aiplatform.googleapis.com` (Vertex AI / Gemini models powering CodeMender)
+   - `aiplatform.googleapis.com` (**Gemini Enterprise** models powering CodeMender; the underlying GCP API retains the legacy `aiplatform` identifier for SDK backward compatibility)
    - `iam.googleapis.com`, `iamcredentials.googleapis.com`, `sts.googleapis.com` (Keyless OIDC token exchange)
    - `cloudresourcemanager.googleapis.com`, `storage.googleapis.com` (Project metadata & FinOps telemetry)
 
 2. **Dedicated Least-Privilege Service Account:**
    - **Email:** `codemender-ci@codemender-latam.iam.gserviceaccount.com`
    - **Project IAM Roles:**
-     - `roles/aiplatform.user` — Required to invoke CodeMender Gemini models on Vertex AI.
+     - `roles/aiplatform.user` — Required to invoke CodeMender **Gemini Enterprise** models (uses the `aiplatform` IAM role identifier for backward compatibility).
      - `roles/serviceusage.serviceUsageConsumer` — Required to consume project quota.
    - **Bucket IAM Role (True Append-Only Audit Trail):**
      - `roles/storage.objectCreator` on `gs://codemender-latam-codemender-telemetry` — Permits **only** `storage.objects.create`. Runners **cannot** read other repositories' SARIF reports, list bucket contents, or overwrite/delete historical audit records (`storage.objects.delete` is denied).
@@ -163,14 +170,14 @@ export RETENTION_PERIOD="365d"   # 1-year WORM audit retention (PCI-DSS Req 10.7
      assertion.repository_owner == 'Cotomacio' && assertion.job_workflow_ref.startsWith('Cotomacio/codemender-enterprise-workflows/.github/workflows/codemender-reusable.yml@')
      ```
      > [!CAUTION]
-     > **Why `assertion.job_workflow_ref` Binding Is Critical for Regulated Enterprises:**  
-     > If a WIF provider only checks `assertion.repository_owner == 'ORG'`, any developer with branch write access in any repository could create a custom `.github/workflows/hack.yml` that calls `google-github-actions/auth` directly and impersonates `codemender-ci` outside the governance of the central pipeline. By enforcing `assertion.job_workflow_ref.startsWith(...)` inside Google Cloud STS, **only jobs executing the central reusable workflow** can obtain a GCP access token.
+     > **Why `assertion.job_workflow_ref` Binding Is Essential:**  
+     > If a WIF provider only checks `assertion.repository_owner == 'ORG'`, any developer with branch write access in any repository could create a custom `.github/workflows/custom.yml` that calls `google-github-actions/auth` directly and impersonates `codemender-ci` outside the governance of the central pipeline. By enforcing `assertion.job_workflow_ref.startsWith(...)` inside Google Cloud STS, **only jobs executing the central reusable workflow** can obtain a GCP access token.
 
    > [!NOTE]
    > **Enterprise GCP Organization Policy Tip (`constraints/iam.workloadIdentityPoolProviders`):**  
-   > In regulated GCP Organizations where `constraints/iam.workloadIdentityPoolProviders` restricts allowed OIDC issuers, ensure the policy allow-lists `is:https://token.actions.githubusercontent.com` (including the `is:` prefix required by GCP Org Policy syntax).
+   > In GCP Organizations where `constraints/iam.workloadIdentityPoolProviders` restricts allowed OIDC issuers, ensure the policy allow-lists `is:https://token.actions.githubusercontent.com` (including the `is:` prefix required by GCP Org Policy syntax).
 
-4. **Hardened WORM FinOps & Security Audit Bucket:**
+4. **Hardened WORM FinOps & Security Telemetry Bucket:**
    - **Bucket URI:** `gs://codemender-latam-codemender-telemetry`
    - **Controls Enforced:**
      - `--uniform-bucket-level-access` (disables legacy per-object ACLs)
@@ -191,9 +198,9 @@ The Platform / AppSec team hosts the reusable workflow and onboarding templates 
 codemender-enterprise-workflows/
 ├── .github/
 │   └── workflows/
-│       └── codemender-reusable.yml              # Central workflow_call engine (569 lines, 0 external scripts)
+│       └── codemender-reusable.yml              # Central workflow_call engine (0 external scripts)
 ├── docs/
-│   └── ENTERPRISE_ARCHITECTURE_GUIDE.md         # This customer-shareable architecture & compliance guide
+│   └── ENTERPRISE_ARCHITECTURE_GUIDE.md         # This customer-shareable architecture & onboarding guide
 ├── examples/
 │   └── caller-repo/
 │       ├── .cmignore                            # Token & scope optimization template
@@ -202,7 +209,8 @@ codemender-enterprise-workflows/
 │               ├── codemender-monthly-async.yml # Template 1: Monthly Deep Audit + Auto-PR (write)
 │               └── codemender-pr-gate.yml       # Template 2: Fast PR Diff Security Gate (read-only)
 ├── scripts/
-│   └── setup-enterprise-wif-and-gcs.sh          # Zero-Trust GCP WIF + WORM GCS bootstrap script
+│   ├── setup-enterprise-wif-and-gcs.sh          # Zero-Trust GCP WIF + WORM GCS bootstrap script
+│   └── setup-finops-bigquery.sh                 # BigQuery External Table & FinOps Views bootstrap script
 └── README.md
 ```
 
@@ -215,16 +223,16 @@ In the central repository (`codemender-enterprise-workflows`), navigate to:
 
 ### Step 3: Configure GitHub Organization Variables
 
-Instead of configuring credentials in 100+ individual repositories, set **4 non-sensitive variables once** at the **GitHub Organization** level (**Organization Settings → Secrets and variables → Actions → Variables → New organization variable**):
+Instead of configuring credentials in individual application repositories, set **4 non-sensitive variables once** at the **GitHub Organization** level (**Organization Settings → Secrets and variables → Actions → Variables → New organization variable**):
 
 | Variable Name | Value in Reference Implementation | Purpose |
 | :--- | :--- | :--- |
-| `GCP_QUOTA_PROJECT` | `codemender-latam` | GCP Project ID where Vertex AI & CodeMender APIs are enabled |
+| `GCP_QUOTA_PROJECT` | `codemender-latam` | GCP Project ID where Gemini Enterprise & CodeMender APIs are enabled |
 | `GCP_WIF_PROVIDER` | `projects/353807816023/locations/global/workloadIdentityPools/github-org-pool/providers/codemender-oidc` | Full Workload Identity Provider resource path |
 | `GCP_SA_EMAIL` | `codemender-ci@codemender-latam.iam.gserviceaccount.com` | Service Account impersonated via short-lived OIDC token |
-| `GCP_TELEMETRY_BUCKET` | `codemender-latam-codemender-telemetry` | Append-only WORM GCS bucket for SARIF & token cost archiving |
+| `GCP_TELEMETRY_BUCKET` | `codemender-latam-codemender-telemetry` | Append-only WORM GCS bucket for SARIF & FinOps token archiving |
 
-*(Note: For personal GitHub accounts or pilot testing on a single repository such as [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments), these exact 4 variables can also be set at the **Repository Variables** level.)*
+*(Note: For personal GitHub accounts or pilot testing on individual repositories such as [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments) and [`Cotomacio/team-b-checkout`](https://github.com/Cotomacio/team-b-checkout), these exact 4 variables can also be set at the **Repository Variables** level.)*
 
 ---
 
@@ -242,7 +250,7 @@ The central workflow [`.github/workflows/codemender-reusable.yml`](https://githu
 | `gcp_telemetry_bucket` | `string` | `''` | Optional WORM GCS bucket name (`vars.GCP_TELEMETRY_BUCKET`) |
 | `scan_path` | `string` | `'.'` | Subdirectory to scan (useful for monorepos) |
 | `scan_mode` | `string` | `'deep'` | `'deep'` (full audit), `'diff'` (PR delta + 1-hop callers), or `'quick'` |
-| `cm_location` | `string` | `'global'` | Vertex AI / CodeMender API location (`global`, `us-central1`, `europe-west1`, etc.) |
+| `cm_location` | `string` | `'global'` | Gemini Enterprise / CodeMender API location (`global`, `us-central1`, `europe-west1`, etc.) |
 | `cm_model` | `string` | `''` | Optional Gemini model override |
 | `cm_context` | `string` | `''` | Architectural or threat-model context passed via `-c` to `cm find` |
 | `enable_autofix` | `boolean` | `true` | Run `cm fix` and open an automated remediation Pull Request |
@@ -261,29 +269,29 @@ The central workflow [`.github/workflows/codemender-reusable.yml`](https://githu
 #### 4.2 Critical Engineering Mechanisms Inside [`codemender-reusable.yml`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml)
 
 1. **Supply-Chain Pinning & Zero Script Injection ([Lines 180–219](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L180-L219)):**
-   - Every official action (`actions/checkout`, `google-github-actions/auth`, `github/codeql-action/upload-sarif`, `actions/upload-artifact`) is pinned to its **immutable 40-character Git commit SHA** (satisfying CIS GitHub Benchmark 4.2.5 and SLSA Build L2).
+   - Every official action (`actions/checkout`, `google-github-actions/auth`, `github/codeql-action/upload-sarif`, `actions/upload-artifact`) is pinned to its **immutable 40-character Git commit SHA**.
    - Zero `${{ ... }}` expressions appear inside `run:` shell blocks. All inputs are passed through environment variables (`env:`) and validated against strict regexes (`^(deep|diff|quick)$`, `^[0-9]+$`, `^[a-zA-Z0-9._-]+$`), eliminating CWE-78 script injection.
 
-2. **Deterministic Cron Jitter for 100+ Repo Scale ([Lines 221–230](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L221-L230)):**
-   - When 100+ repositories share a monthly cron schedule (`0 6 1-7 * 1`), triggering simultaneously can exhaust regional or global Vertex AI API quotas (`429 Resource Exhausted`).
+2. **Deterministic Cron Jitter for Multi-Repository Schedules ([Lines 221–230](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L221-L230)):**
+   - When multiple repositories share a monthly cron schedule (`0 6 1-7 * 1`), triggering simultaneously can cause regional or global Gemini Enterprise API quota spikes (`429 Resource Exhausted`).
    - On `schedule` events, the workflow computes a deterministic hash of `$GITHUB_REPOSITORY` (`cksum`) modulo `schedule_jitter_max_seconds` (default `300s`), staggering starts smoothly across the window with zero manual coordination.
 
-3. **WIF Credential Relocation & Post-Run Shredding ([Lines 240–256](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L240-L256), [Lines 566–569](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L566-L569)):**
+3. **WIF Credential Relocation & Post-Run Shredding ([Lines 240–256](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L240-L256), [Lines 649–658](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L649-L658)):**
    - `google-github-actions/auth` writes its short-lived OIDC credential file (`gha-creds-*.json`) directly into `$GITHUB_WORKSPACE`.
    - Because CodeMender runs `git checkout HEAD -- . && git clean -fd` inside `$GITHUB_WORKSPACE` to guarantee a clean worktree before scanning and patching, an unprotected credential file inside the workspace would be deleted mid-run.
    - The workflow relocates the credential file into `$RUNNER_TEMP/gcp-creds.json` (`chmod 600`), adds `.cm_project`, `.exploit`, and `gha-creds-*.json` to `.git/info/exclude`, and shreds the credential file in an `if: ${{ always() }}` final step.
 
 4. **Direct Artifact Registry CLI Download + SHA-256 Integrity Verification ([Lines 258–279](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L258-L279)):**
    - Downloads `cm-linux-amd64.zip` from `https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm%3A${CM_VERSION}%3Acm-linux-amd64.zip:download?alt=media` with automatic network retries (`--retry 3 --retry-delay 2 --retry-all-errors`).
-   - Computes and logs the **SHA-256 digest** of both the `.zip` archive and the extracted `cm` binary for forensic audit trails, and enforces `sha256sum --check --strict` whenever `cm_sha256` is specified.
+   - Computes and logs the **SHA-256 digest** of both the `.zip` archive and the extracted `cm` binary, and enforces `sha256sum --check --strict` whenever `cm_sha256` is specified.
 
 5. **Untrusted Workspace Sanitization ([Lines 281–297](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L281-L297)):**
-   - Purges any pre-existing `.cm_project`, `.exploit`, or `~/.codemender` directories prior to `cm init` so a maliciously crafted repository cannot inject pre-seeded CodeMender configuration files.
+   - Purges any pre-existing `.cm_project`, `.exploit`, or `~/.codemender` directories prior to `cm init` so a repository cannot inject pre-seeded CodeMender configuration files.
 
 6. **SARIF v2.1.0 Normalization for GitHub Code Scanning ([Lines 331–359](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L331-L359)):**
    - Normalizes `artifactLocation.uri` via `jq` to strip `${GITHUB_WORKSPACE}/` prefixes and guarantees `region.startLine >= 1`, ensuring GitHub Code Scanning anchors every alert directly onto the exact source file and line in the repository.
 
-7. **Atomic Commits (`--no-verify`) & Native `gh pr` Pull Request Creation ([Lines 408–475](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L408-L475), [Lines 500–546](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L500-L546)):**
+7. **Atomic Commits (`--no-verify`) & Native `gh pr` Pull Request Creation ([Lines 408–465](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L408-L465), [Lines 578–630](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L578-L630)):**
    - Iterates through up to `fix_limit` open findings matching `fix_severities` (prioritizing `CRITICAL` over `HIGH` and excluding `[LEGACY / UNTOUCHED]` delta items), sanitizing TSV fields against control-character injection.
    - Runs `cm fix <FINDING_ID> --sandbox=false --yes --bypass-warning < /dev/null`, stages only tracked modifications (`git add -u`), cleans untracked temporary files, and creates a dedicated **atomic commit** with `git commit --no-verify` (preventing untrusted `.git/hooks` from executing):
      ```text
@@ -292,7 +300,7 @@ The central workflow [`.github/workflows/codemender-reusable.yml`](https://githu
      ```
    - Pushes `codemender/remediate-<branch>` and creates or updates the Pull Request using the official pre-installed GitHub CLI (`gh pr create` / `gh pr edit`)—requiring **zero third-party community GitHub Actions**.
 
-8. **Fail-Closed PR Security Gate ([Lines 299–329](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L299-L329), [Lines 548–564](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L548-L564)):**
+8. **Fail-Closed PR Security Gate ([Lines 299–329](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L299-L329), [Lines 632–647](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L632-L647)):**
    - Captures the true exit code of `cm find` via `${PIPESTATUS[0]}` (`scan_exit_code`).
    - When `enforce_gate: true`, the gate fails (`exit 1`) not only when open `CRITICAL`/`HIGH` findings are detected, but also if `scan_exit_code != 0` or `steps.triage.outcome != 'success'`—eliminating CWE-636 fail-open vulnerabilities during quota or network outages.
 
@@ -300,7 +308,7 @@ The central workflow [`.github/workflows/codemender-reusable.yml`](https://githu
 
 ### Step 5: Onboarding an Application Team Repository (`team-a-payments`)
 
-To onboard any application repository—demonstrated live in [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments)—the application squad adds **3 declarative configuration files** to their repository.
+To onboard any application repository—demonstrated live in [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments) and [`Cotomacio/team-b-checkout`](https://github.com/Cotomacio/team-b-checkout)—the application squad adds **3 declarative configuration files** to their repository.
 
 #### 5.1 File 1: `.cmignore` (Scope & Token Optimization)
 Placed at the root of the application repository ([`team-a-payments/.cmignore`](https://github.com/Cotomacio/team-a-payments/blob/main/.cmignore)) to exclude unit tests, mocks, generated protobuf/OpenAPI stubs, and internal tooling directories from AI analysis:
@@ -505,8 +513,13 @@ gs://codemender-latam-codemender-telemetry/
     └── 20261028T141632Z-40699571878-Cotomacio_team-b-checkout.jsonl
 ```
 
-##### Provisioning BigQuery FinOps Analytics (`scripts/setup-finops-bigquery.sh`)
-Run the included provisioning script ([`scripts/setup-finops-bigquery.sh`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/scripts/setup-finops-bigquery.sh)) once to create the `codemender_finops` dataset, the `scan_telemetry` External Table over `gs://codemender-latam-codemender-telemetry/codemender-finops-jsonl/*.jsonl`, and two executive FinOps views:
+##### Required Operator Permissions & Provisioning (`scripts/setup-finops-bigquery.sh`)
+Before running [`scripts/setup-finops-bigquery.sh`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/scripts/setup-finops-bigquery.sh), ensure the operator holds the following IAM roles (verified by the script's `[0/4]` pre-flight check):
+- `roles/serviceusage.serviceUsageAdmin` (if `bigquery.googleapis.com` is not yet enabled)
+- `roles/bigquery.dataEditor` (or `roles/bigquery.admin`) + `roles/bigquery.jobUser` on `$PROJECT_ID`
+- `roles/storage.objectViewer` on `gs://codemender-latam-codemender-telemetry`
+
+Run the provisioning script once to create the `codemender_finops` dataset, the `scan_telemetry` External Table over `gs://codemender-latam-codemender-telemetry/codemender-finops-jsonl/*.jsonl`, and two executive FinOps views:
 
 ```bash
 ./scripts/setup-finops-bigquery.sh codemender-latam codemender-latam-codemender-telemetry codemender_finops
@@ -551,76 +564,62 @@ FROM `codemender-latam.codemender_finops.v_command_bucket_breakdown`;
 
 > [!TIP]
 > **FinOps Insight — Over 72% Context Cache Efficiency & Sub-Dollar Remediation:**  
-> Across both repositories (`2.66M` total tokens), Vertex AI Context Caching served **72.1% to 73.6%** of all input tokens from cache. Full deep-scan detection plus autonomous patch generation and verification cost **`$0.73` total for Team A (`$0.36` per fixed vulnerability)** and **`$1.50` total for Team B (`$0.50` per fixed vulnerability)**. Platform teams can connect **Looker Studio** directly to `codemender-latam.codemender_finops.v_repository_finops_summary` for real-time FinOps chargeback dashboards by repository and business unit.
+> Across both repositories (`2.66M` total tokens), **Gemini Enterprise** Context Caching served **72.1% to 73.6%** of all input tokens from cache. Full deep-scan detection plus autonomous patch generation and verification cost **`$0.73` total for Team A (`$0.36` per fixed vulnerability)** and **`$1.50` total for Team B (`$0.50` per fixed vulnerability)**. Platform teams can connect **Looker Studio** directly to `codemender-latam.codemender_finops.v_repository_finops_summary` for real-time FinOps chargeback dashboards by repository and business unit.
 
 ---
 
-## 3. Regulated Enterprise Governance, Compliance & Security Hardening Reference
+## 3. Enterprise Governance & Security Hardening Reference
 
-This section provides the control documentation required by CISOs, Cloud Risk Officers, and External Auditors in regulated industries (**Banking, Fintech, Healthcare, Insurance, Government**).
+This section documents the engineering and security hardening controls built into the reference architecture.
 
-### 3.1 Regulatory & Compliance Framework Mapping
+### 3.1 Supply-Chain Hardening: Immutable Workflow Versioning (`@v1.0.0` vs `@main`)
 
-| Framework / Standard | Control ID | Requirement Summary | How This Architecture Satisfies the Control |
-| :--- | :--- | :--- | :--- |
-| **PCI-DSS v4.0** | **Req 6.3.2 & 6.5** | Inventory bespoke/custom software, scan for vulnerabilities, and manage all code changes via controlled change processes. | Automated `--deep` and `--diff` scans produce SARIF v2.1.0 alerts; patches are delivered exclusively as atomic commits inside reviewable Pull Requests. |
-| **PCI-DSS v4.0** | **Req 10.5.1 & 10.7** | Retain audit logs for at least 12 months and protect logs so they cannot be altered or deleted. | GCS bucket enforces `--retention-period=365d` (WORM), `--public-access-prevention`, `--no-clobber`, and `roles/storage.objectCreator` (no delete/overwrite permissions). |
-| **SOC 2 Type II** | **CC6.1 & CC6.6** | Logical access security & boundary protection using least-privilege ephemeral credentials. | Zero long-lived keys; WIF OIDC provider enforces both `assertion.repository_owner` and `assertion.job_workflow_ref` binding; PR gates run with `contents: read`. |
-| **SOC 2 Type II** | **CC7.2 & CC8.1** | Security event monitoring & authorized change management before production deployment. | Fail-closed PR security gates (`enforce_gate: true`) block vulnerable merges; `cm fix` atomic commits require human PR approval before merge. |
-| **ISO/IEC 27001:2022** | **A.8.9, A.8.15, A.8.25, A.8.28** | Configuration management, immutable logging, secure SDLC rules, and secure coding verification. | Centrally governed reusable workflow eliminates configuration drift across 100+ repositories; all inputs sanitized against CWE-78 script injection. |
-| **NIST SP 800-218 (SSDF v1.1)** | **PW.4, PW.7, PO.3, RV.1** | Secure software supply chain, automated human-reviewed code analysis, and vulnerability remediation. | All GitHub/Google actions pinned to 40-char commit SHAs; zero third-party community actions; `cm` binary SHA-256 logged & verified (`cm_sha256`). |
-| **CIS GitHub Benchmark v1.0** | **4.2.3 & 4.2.5** | Pin all actions to full-length commit SHAs; restrict `GITHUB_TOKEN` to minimum required permissions. | 40-char SHA pinning in `codemender-reusable.yml`; explicit least-privilege `permissions:` blocks in caller templates; zero `${{ }}` macro expansion in `run:`. |
-| **SEC Rule 17a-4 / DORA / BACEN 4.893** | **WORM & Operational Resilience** | Immutable audit preservation and protection against cloud service quota exhaustion. | GCS WORM retention policy + deterministic per-repository cron jitter (`schedule_jitter_max_seconds`) prevents Vertex AI `429` thundering-herd outages. |
-
----
-
-### 3.2 Supply-Chain Hardening: Immutable Workflow Versioning (`@v1.0.0` vs `@main`)
-
-In the demo repository (`team-a-payments`), caller workflows reference `@main` for rapid iteration. In **regulated production environments**, Platform teams should publish signed Git tags/releases on `codemender-enterprise-workflows` (e.g., `v1.0.0`) or pin to a 40-character commit SHA:
+In the demo repositories (`team-a-payments` and `team-b-checkout`), caller workflows reference `@main` for rapid iteration. In **production environments**, Platform teams should publish signed Git tags/releases on `codemender-enterprise-workflows` (e.g., `v1.0.0`) or pin to a 40-character commit SHA:
 
 ```yaml
-# Recommended for Regulated Production Repositories:
+# Recommended for Production Repositories:
 uses: Cotomacio/codemender-enterprise-workflows/.github/workflows/codemender-reusable.yml@v1.0.0
 ```
 Additionally, Platform teams can pass `cm_version` (e.g., `'0.16.6'`) and `cm_sha256` (`'<64-char-hex-digest>'`) so every runner cryptographically verifies the exact CodeMender CLI archive before extraction.
 
 ---
 
-### 3.3 Data Privacy, Vertex AI Zero Data Retention, Regional Residency & VPC Service Controls
+### 3.2 Data Privacy, Gemini Enterprise Zero Data Retention, Regional Residency & VPC Service Controls
 
-Financial institutions and healthcare organizations frequently require strict guarantees regarding source code confidentiality when invoking cloud AI models:
+Enterprise organizations frequently require strict guarantees regarding source code confidentiality when invoking cloud AI models:
 
-1. **Google Cloud Data Governance Guarantee:** Under Google Cloud's Enterprise Data Governance terms for Vertex AI, customer source code, prompts, and generated patches sent to Vertex AI / Gemini models **are never used to train Google foundation models**.
-2. **Zero Data Retention & Abuse Monitoring Exemption:** Regulated customers can enable **Zero Data Retention (ZDR)** and opt out of human abuse review caching on their Google Cloud project (`codemender-latam`) so prompts and code context are processed strictly in memory.
-3. **Regional Data Residency (`cm_location`):** If regulatory mandates (such as GDPR in the EU or BACEN in Brazil) require regional API endpoints rather than `global`, pass `cm_location: 'us-central1'` or `cm_location: 'europe-west1'` to the reusable workflow and set `BUCKET_LOCATION` to the matching region when running `setup-enterprise-wif-and-gcs.sh`.
+1. **Google Cloud Data Governance Guarantee:** Under Google Cloud's Enterprise Data Governance terms for **Gemini Enterprise**, customer source code, prompts, and generated patches sent to Gemini models **are never used to train Google foundation models**.
+2. **Zero Data Retention & Abuse Monitoring Exemption:** Customers can enable **Zero Data Retention (ZDR)** and opt out of human abuse review caching on their Google Cloud project (`codemender-latam`) so prompts and code context are processed strictly in memory.
+3. **Regional Data Residency (`cm_location`):** If organizational data residency policies require regional API endpoints rather than `global`, pass `cm_location: 'us-central1'` or `cm_location: 'europe-west1'` to the reusable workflow and set `BUCKET_LOCATION` to the matching region when running `setup-enterprise-wif-and-gcs.sh`.
 4. **VPC Service Controls (VPC-SC) & Self-Hosted Runners:**
-   - For banks enforcing **VPC Service Controls** perimeters around `aiplatform.googleapis.com` and `storage.googleapis.com`, deploy **GitHub Actions Runner Controller (ARC)** on internal Google Kubernetes Engine (GKE) clusters inside the authorized VPC network.
+   - For organizations enforcing **VPC Service Controls** perimeters around `aiplatform.googleapis.com` (the backward-compatible Gemini Enterprise endpoint) and `storage.googleapis.com`, deploy **GitHub Actions Runner Controller (ARC)** on internal Google Kubernetes Engine (GKE) clusters inside the authorized VPC network.
    - Configure an ingress/egress policy or Private Google Access (`private.googleapis.com`) so all CodeMender traffic remains entirely on Google's private backbone.
 
 ---
 
-### 3.4 Untrusted Code Execution Isolation & Ephemeral Runner Hardening
+### 3.3 Untrusted Code Execution Isolation & Ephemeral Runner Hardening
 
 During `cm find` and `cm fix`, CodeMender may invoke build verification or test commands configured in the repository. To prevent untrusted code in a Pull Request from compromising credentials or persisting across runs:
 1. **Ephemeral VM Isolation:** Each GitHub-hosted `ubuntu-24.04` job (or ephemeral GKE ARC pod with `gVisor` / Kata Containers isolation) runs in a single-use virtual environment destroyed immediately after the job completes.
 2. **Pre-Init Workspace Sanitization:** Before running `cm init`, the reusable workflow executes `rm -rf .cm_project .exploit ~/.codemender` ([Line 285](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L285)), ensuring a repository cannot pre-seed malicious `.cm_project` configurations.
 3. **Git Hook Bypass (`--no-verify`):** Atomic commits use `git commit --no-verify` ([Line 453](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L453)) so untrusted scripts inside `.git/hooks/` are never triggered.
-4. **Post-Run Credential Shredding:** The final workflow step (`Shred Temporary WIF Credentials`, `if: ${{ always() }}`, [Lines 566–569](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L566-L569)) deletes `$RUNNER_TEMP/gcp-creds.json` and `~/.config/gcloud/application_default_credentials.json`.
+4. **Post-Run Credential Shredding:** The final workflow step (`Shred Temporary WIF Credentials`, `if: ${{ always() }}`, [Lines 649–658](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L649-L658)) deletes `$RUNNER_TEMP/gcp-creds.json` and `~/.config/gcloud/application_default_credentials.json`.
 
 ---
 
-### 3.5 GitHub Rulesets, Required Status Checks & Signed Commits (`secrets.pr_token`)
+### 3.4 GitHub Rulesets, Required Status Checks & Signed Commits (`secrets.pr_token`)
 
-In mature enterprises where `main` is protected by **GitHub Repository Rulesets** requiring status checks (unit tests, SAST) to pass before merging:
+In enterprises where `main` is protected by **GitHub Repository Rulesets** requiring status checks (unit tests, SAST) to pass before merging:
 - **Known GitHub Actions Platform Behavior:** By default, branches pushed and Pull Requests opened using the built-in `secrets.GITHUB_TOKEN` **do not trigger downstream `on: pull_request` workflows** (a GitHub anti-recursion safeguard).
-- **Enterprise Solution Built Into `codemender-reusable.yml`:** The reusable workflow supports an optional `secrets.pr_token` secret ([Lines 144–146](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L144-L146), [Line 503](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L503)). Organizations can pass a **GitHub App Installation Token** (generated via `actions/create-github-app-token` or stored as an Org secret) via `secrets: pr_token: ${{ secrets.CODEMENDER_APP_TOKEN }}`. Pull Requests opened with a GitHub App token automatically trigger all required CI status checks on `codemender/remediate-main`.
+- **Enterprise Solution Built Into `codemender-reusable.yml`:** The reusable workflow supports an optional `secrets.pr_token` secret ([Lines 144–146](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L144-L146), [Line 581](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L581)). Organizations can pass a **GitHub App Installation Token** (generated via `actions/create-github-app-token` or stored as an Org secret) via `secrets: pr_token: ${{ secrets.CODEMENDER_APP_TOKEN }}`. Pull Requests opened with a GitHub App token automatically trigger all required CI status checks on `codemender/remediate-main`.
 
 ---
 
 ## 4. Enterprise Rollout Checklist for Customers
 
-- [ ] **1. GCP Project & APIs:** Select or create a dedicated GCP project for CodeMender quota and run [`scripts/setup-enterprise-wif-and-gcs.sh`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/scripts/setup-enterprise-wif-and-gcs.sh) with `ENFORCE_JOB_WORKFLOW_REF=true` and `RETENTION_PERIOD=365d`.
-- [ ] **2. Central Workflow Repo:** Fork or copy [`Cotomacio/codemender-enterprise-workflows`](https://github.com/Cotomacio/codemender-enterprise-workflows) into your GitHub Organization, tag an immutable release (`v1.0.0`), and enable **Actions → Access → Accessible from repositories in the organization**.
-- [ ] **3. Organization Variables:** Configure `GCP_QUOTA_PROJECT`, `GCP_WIF_PROVIDER`, `GCP_SA_EMAIL`, and `GCP_TELEMETRY_BUCKET` in GitHub Organization Variables.
-- [ ] **4. Pilot Onboarding:** Copy [`.cmignore`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/examples/caller-repo/.cmignore), [`codemender-monthly-async.yml`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/examples/caller-repo/.github/workflows/codemender-monthly-async.yml), and [`codemender-pr-gate.yml`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/examples/caller-repo/.github/workflows/codemender-pr-gate.yml) into a pilot repository (like [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments)) and trigger a `workflow_dispatch` run.
-- [ ] **5. Organization-Wide Scale:** Roll out the 3 template files across all 100+ repositories via an automated onboarding PR or GitHub repository template.
+- [ ] **1. GCP Project & APIs:** Select or create a dedicated GCP project for CodeMender quota, verify operator IAM permissions, and run [`scripts/setup-enterprise-wif-and-gcs.sh`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/scripts/setup-enterprise-wif-and-gcs.sh) with `ENFORCE_JOB_WORKFLOW_REF=true` and `RETENTION_PERIOD=365d`.
+- [ ] **2. Optional BigQuery FinOps Setup:** Run [`scripts/setup-finops-bigquery.sh`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/scripts/setup-finops-bigquery.sh) to provision the `codemender_finops` BigQuery dataset, External Table, and executive FinOps views.
+- [ ] **3. Central Workflow Repo:** Fork or copy [`Cotomacio/codemender-enterprise-workflows`](https://github.com/Cotomacio/codemender-enterprise-workflows) into your GitHub Organization, tag an immutable release (`v1.0.0`), and enable **Actions → Access → Accessible from repositories in the organization**.
+- [ ] **4. Organization Variables:** Configure `GCP_QUOTA_PROJECT`, `GCP_WIF_PROVIDER`, `GCP_SA_EMAIL`, and `GCP_TELEMETRY_BUCKET` in GitHub Organization Variables.
+- [ ] **5. Pilot Onboarding:** Copy [`.cmignore`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/examples/caller-repo/.cmignore), [`codemender-monthly-async.yml`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/examples/caller-repo/.github/workflows/codemender-monthly-async.yml), and [`codemender-pr-gate.yml`](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/examples/caller-repo/.github/workflows/codemender-pr-gate.yml) into pilot repositories (such as [`Cotomacio/team-a-payments`](https://github.com/Cotomacio/team-a-payments) and [`Cotomacio/team-b-checkout`](https://github.com/Cotomacio/team-b-checkout)) and trigger a `workflow_dispatch` run.
+- [ ] **6. Organization-Wide Rollout:** Roll out the 3 template files across your organization's application repositories via an automated onboarding PR or GitHub repository template.

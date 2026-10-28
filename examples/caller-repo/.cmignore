@@ -3,7 +3,7 @@
 # =============================================================================
 # Place this file at the root of an application repository to exclude
 # non-production files, test fixtures, generated clients, and static assets
-# from `cm find`, reducing scan latency and Vertex AI token consumption.
+# from `cm find`, reducing scan latency and Gemini Enterprise token consumption.
 # =============================================================================
 
 # Dependency, VCS & Local Tooling Directories
