@@ -464,8 +464,12 @@ jobs:
           done < "$RUNNER_TEMP/findings.tsv"
 
           # Refresh post-fix reports & token telemetry
-          cm report --format=sarif > "$RUNNER_TEMP/codemender.sarif" 2>/dev/null || true
-          cm stats --json > "$RUNNER_TEMP/codemender-stats.json" 2>/dev/null || true
+          if cm report --format=sarif > "$RUNNER_TEMP/codemender-postfix.sarif" 2>/dev/null && jq -e '.runs' "$RUNNER_TEMP/codemender-postfix.sarif" >/dev/null 2>&1; then
+            mv "$RUNNER_TEMP/codemender-postfix.sarif" "$RUNNER_TEMP/codemender.sarif"
+          fi
+          if cm stats --json > "$RUNNER_TEMP/codemender-stats-postfix.json" 2>/dev/null && jq -e '.total_tokens' "$RUNNER_TEMP/codemender-stats-postfix.json" >/dev/null 2>&1; then
+            mv "$RUNNER_TEMP/codemender-stats-postfix.json" "$RUNNER_TEMP/codemender-stats.json"
+          fi
 
           echo "fixed_count=$FIXED_COUNT" >> "$GITHUB_OUTPUT"
           {
@@ -475,16 +479,100 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Archive Telemetry & SARIF to GCS (Append-Only WORM Audit Trail)
-        if: ${{ always() && env.GCS_TELEMETRY_BUCKET != '' && steps.triage.outcome == 'success' }}
+        if: ${{ always() && steps.triage.outcome == 'success' }}
+        env:
+          TOTAL_OPEN: ${{ steps.triage.outputs.total_open || '0' }}
+          TARGET_FINDINGS: ${{ steps.triage.outputs.high_critical || '0' }}
+          FIXED_FINDINGS: ${{ steps.autofix.outputs.fixed_count || '0' }}
         run: |
           set -uo pipefail
+          ISO_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          SCAN_DATE=$(date -u +"%Y-%m-%d")
           DATE_PATH=$(date -u +"%Y/%m/%d")
           TS=$(date -u +"%Y%m%dT%H%M%SZ")
-          REPORT_URI="gs://${GCS_TELEMETRY_BUCKET}/codemender-telemetry/${GITHUB_REPOSITORY}/${DATE_PATH}/${TS}-${GITHUB_RUN_ID}"
-          echo "Archiving immutable SARIF & token telemetry to ${REPORT_URI}..."
-          gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender-open.json"  "${REPORT_URI}/findings-open.json" || echo "::warning::Failed to archive findings-open.json to GCS"
-          gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender.sarif"      "${REPORT_URI}/codemender.sarif"     || echo "::warning::Failed to archive codemender.sarif to GCS"
-          gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender-stats.json" "${REPORT_URI}/stats.json"          || echo "::warning::Failed to archive stats.json to GCS"
+          REPO_OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          REPO_SLUG="${GITHUB_REPOSITORY//\//_}"
+
+          # Build single-line BigQuery-ready NDJSON (NEWLINE_DELIMITED_JSON) FinOps record
+          jq -c \
+            --arg event_timestamp "$ISO_TS" \
+            --arg scan_date "$SCAN_DATE" \
+            --arg gcp_project_id "$GOOGLE_CLOUD_PROJECT" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg repository_owner "$REPO_OWNER" \
+            --arg repository_name "$REPO_NAME" \
+            --arg scan_mode "$SCAN_MODE" \
+            --arg scan_path "$SCAN_PATH" \
+            --arg github_event_name "$GITHUB_EVENT_NAME" \
+            --arg git_ref "$GITHUB_REF_NAME" \
+            --arg git_sha "$GITHUB_SHA" \
+            --argjson github_run_id "${GITHUB_RUN_ID:-0}" \
+            --argjson total_open_findings "${TOTAL_OPEN:-0}" \
+            --argjson target_findings "${TARGET_FINDINGS:-0}" \
+            --argjson fixed_findings "${FIXED_FINDINGS:-0}" \
+            --argjson autofix_enabled "$( [ "$ENABLE_AUTOFIX" = "true" ] && echo true || echo false )" \
+            '{
+              event_timestamp: $event_timestamp,
+              scan_date: $scan_date,
+              gcp_project_id: $gcp_project_id,
+              repository: $repository,
+              repository_owner: $repository_owner,
+              repository_name: $repository_name,
+              scan_mode: $scan_mode,
+              scan_path: $scan_path,
+              github_run_id: $github_run_id,
+              github_event_name: $github_event_name,
+              git_ref: $git_ref,
+              git_sha: $git_sha,
+              total_open_findings: $total_open_findings,
+              target_findings: $target_findings,
+              fixed_findings: $fixed_findings,
+              autofix_enabled: $autofix_enabled,
+              since: (.since // "7 days"),
+              total_turns: (.total_turns // 0),
+              total_polls: (.total_polls // 0),
+              command_types: (.command_types // 0),
+              input_tokens: (.input_tokens // 0),
+              output_tokens: (.output_tokens // 0),
+              cached_tokens: (.cached_tokens // 0),
+              thought_tokens: (.thought_tokens // 0),
+              tool_calls: (.tool_calls // 0),
+              total_tokens: (.total_tokens // 0),
+              cache_hit_percent: (.cache_hit_percent // 0),
+              think_ratio_percent: (.think_ratio_percent // 0),
+              duration_seconds: (.duration_seconds // 0),
+              duration_formatted: (.duration_formatted // "00m 00s"),
+              buckets: (.buckets // [])
+            }' "$RUNNER_TEMP/codemender-stats.json" > "$RUNNER_TEMP/codemender-telemetry.jsonl"
+
+          # Append FinOps Token Telemetry table to GitHub Step Summary
+          {
+            echo ""
+            echo "### 💰 FinOps Token & Compute Telemetry"
+            echo "| Total Tokens | Input Tokens | Output Tokens | Cached Tokens (Hit %) | Thought Tokens | Duration | Fixed Findings |"
+            echo "| :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+            jq -r '
+              "| **" + (.total_tokens | tostring) + "** | " +
+              (.input_tokens | tostring) + " | " +
+              (.output_tokens | tostring) + " | " +
+              (.cached_tokens | tostring) + " (" + (((.cache_hit_percent // 0) * 100 | round / 100) | tostring) + "%) | " +
+              (.thought_tokens | tostring) + " | `" +
+              (.duration_formatted // "00m 00s") + "` | **" +
+              (.fixed_findings | tostring) + "** |"
+            ' "$RUNNER_TEMP/codemender-telemetry.jsonl" 2>/dev/null || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$GCS_TELEMETRY_BUCKET" ]; then
+            REPORT_URI="gs://${GCS_TELEMETRY_BUCKET}/codemender-telemetry/${GITHUB_REPOSITORY}/${DATE_PATH}/${TS}-${GITHUB_RUN_ID}"
+            BQ_JSONL_URI="gs://${GCS_TELEMETRY_BUCKET}/codemender-finops-jsonl/${TS}-${GITHUB_RUN_ID}-${REPO_SLUG}.jsonl"
+            echo "Archiving immutable SARIF & token telemetry to ${REPORT_URI} and ${BQ_JSONL_URI}..."
+            gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender-open.json"       "${REPORT_URI}/findings-open.json" || echo "::warning::Failed to archive findings-open.json to GCS"
+            gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender.sarif"           "${REPORT_URI}/codemender.sarif"     || echo "::warning::Failed to archive codemender.sarif to GCS"
+            gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender-stats.json"      "${REPORT_URI}/stats.json"          || echo "::warning::Failed to archive stats.json to GCS"
+            gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender-telemetry.jsonl" "${REPORT_URI}/telemetry.jsonl"     || echo "::warning::Failed to archive telemetry.jsonl to GCS"
+            gcloud storage cp --no-clobber "$RUNNER_TEMP/codemender-telemetry.jsonl" "${BQ_JSONL_URI}"                   || echo "::warning::Failed to archive BigQuery JSONL to GCS"
+          fi
 
       - name: Upload Reports as Workflow Artifacts
         if: ${{ always() && steps.triage.outcome == 'success' }}
@@ -495,6 +583,7 @@ jobs:
             ${{ runner.temp }}/codemender.sarif
             ${{ runner.temp }}/codemender-open.json
             ${{ runner.temp }}/codemender-stats.json
+            ${{ runner.temp }}/codemender-telemetry.jsonl
           retention-days: 30
 
       - name: Open Autonomous Remediation Pull Request
