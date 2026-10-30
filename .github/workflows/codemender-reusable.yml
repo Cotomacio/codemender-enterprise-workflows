@@ -87,6 +87,11 @@ on:
         required: false
         default: ''
         type: string
+      cm_team_id:
+        description: 'Optional team identifier for CodeMender v0.17.0+ FinOps telemetry ($CM_TEAM_ID; defaults to the short repository name)'
+        required: false
+        default: ''
+        type: string
       enable_autofix:
         description: 'Run cm fix on open findings and open an automated remediation Pull Request'
         required: false
@@ -160,6 +165,8 @@ jobs:
       CLOUD_ML_PROJECT_ID: ${{ inputs.gcp_project_id }}
       GOOGLE_CLOUD_PROJECT: ${{ inputs.gcp_project_id }}
       CM_LOCATION: ${{ inputs.cm_location }}
+      CM_PLAIN: 'true'
+      CM_TEAM_ID_INPUT: ${{ inputs.cm_team_id }}
       SCAN_PATH: ${{ inputs.scan_path }}
       SCAN_MODE: ${{ inputs.scan_mode }}
       CM_MODEL: ${{ inputs.cm_model }}
@@ -217,6 +224,13 @@ jobs:
             echo "::error title=Invalid SHA-256 Digest::cm_sha256 must be a 64-character hex string."
             exit 1
           fi
+          RESOLVED_TEAM_ID="${CM_TEAM_ID_INPUT:-${GITHUB_REPOSITORY#*/}}"
+          RESOLVED_TEAM_ID="${RESOLVED_TEAM_ID:0:63}"
+          if [[ ! "$RESOLVED_TEAM_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error title=Invalid Team ID::cm_team_id must contain only [A-Za-z0-9._-] (max 63 chars)."
+            exit 1
+          fi
+          echo "CM_TEAM_ID=$RESOLVED_TEAM_ID" >> "$GITHUB_ENV"
 
       - name: Apply Deterministic Cron Jitter (Scheduled Runs Only)
         if: ${{ github.event_name == 'schedule' && inputs.schedule_jitter_max_seconds != '0' }}
@@ -293,7 +307,7 @@ jobs:
             sed -i 's/command: ""/command: "python3 -m compileall -q ."/' ~/.codemender/config.yaml || true
           fi
 
-          # Run pre-flight health check (v0.16.0+)
+          # Run pre-flight health check (v0.17.0+)
           cm health --strict || cm init --verify || echo "::warning::Pre-flight check reported non-fatal warnings."
 
       - name: Execute CodeMender Scan (cm find)
@@ -324,8 +338,32 @@ jobs:
           SCAN_RC=${PIPESTATUS[0]}
           set -e
           echo "scan_exit_code=$SCAN_RC" >> "$GITHUB_OUTPUT"
+
+          # Handle CodeMender v0.17.0+ layered setup/transport exit codes (10/20/30/40/50)
+          # and collect a redacted diagnostic support bundle on any non-zero exit.
           if [ "$SCAN_RC" -ne 0 ]; then
-            echo "::warning title=CodeMender Scan Non-Zero Exit::cm find exited with status $SCAN_RC. Check logs for API quota or connectivity issues."
+            case "$SCAN_RC" in
+              10)
+                echo "::error title=CodeMender Credential Failure (Exit Code 10)::Invalid or missing OAuth / WIF / Service Account credentials."
+                ;;
+              20)
+                echo "::error title=CodeMender Configuration Failure (Exit Code 20)::Invalid config.yaml, team_id, backend, or KMS key configuration."
+                ;;
+              30)
+                echo "::error title=CodeMender Reachability Failure (Exit Code 30)::Endpoint unreachable (check DNS, TLS, or VPC Service Controls perimeter)."
+                ;;
+              40)
+                echo "::error title=CodeMender Authorization Failure (Exit Code 40)::Service Account lacks IAM permissions to access the configured Gemini Enterprise / CodeMender project or agent."
+                ;;
+              50)
+                echo "::error title=CodeMender Timeout (Exit Code 50)::CodeMender probe or session timed out."
+                ;;
+              *)
+                echo "::warning title=CodeMender Scan Non-Zero Exit::cm find exited with status $SCAN_RC. Check logs for API quota or connectivity issues."
+                ;;
+            esac
+            echo "Collecting redacted CodeMender diagnostic support bundle (cm support-bundle)..."
+            cm support-bundle --skip-health -o "$RUNNER_TEMP/cm-support-bundle.tar.gz" 2>/dev/null || true
           fi
 
       - name: Export Reports, Token Telemetry & Triage Findings
@@ -502,6 +540,8 @@ jobs:
             --arg repository "$GITHUB_REPOSITORY" \
             --arg repository_owner "$REPO_OWNER" \
             --arg repository_name "$REPO_NAME" \
+            --arg team_id "${CM_TEAM_ID:-$REPO_NAME}" \
+            --arg cm_model "${CM_MODEL:-gemini-3.8-flash}" \
             --arg scan_mode "$SCAN_MODE" \
             --arg scan_path "$SCAN_PATH" \
             --arg github_event_name "$GITHUB_EVENT_NAME" \
@@ -519,6 +559,8 @@ jobs:
               repository: $repository,
               repository_owner: $repository_owner,
               repository_name: $repository_name,
+              team_id: (.team_id // $team_id),
+              cm_model: (.model // (if (.models | type) == "array" and (.models | length) > 0 then (.models | join(",")) else $cm_model end)),
               scan_mode: $scan_mode,
               scan_path: $scan_path,
               github_run_id: $github_run_id,
@@ -550,10 +592,10 @@ jobs:
           {
             echo ""
             echo "### 💰 FinOps Token & Compute Telemetry"
-            echo "| Total Tokens | Input Tokens | Output Tokens | Cached Tokens (Hit %) | Thought Tokens | Duration | Fixed Findings |"
-            echo "| :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+            echo "| Team ID | Model | Total Tokens | Input Tokens | Output Tokens | Cached Tokens (Hit %) | Thought Tokens | Duration | Fixed Findings |"
+            echo "| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
             jq -r '
-              "| **" + (.total_tokens | tostring) + "** | " +
+              "| `" + (.team_id // "N/A") + "` | `" + (.cm_model // "default") + "` | **" + (.total_tokens | tostring) + "** | " +
               (.input_tokens | tostring) + " | " +
               (.output_tokens | tostring) + " | " +
               (.cached_tokens | tostring) + " (" + (((.cache_hit_percent // 0) * 100 | round / 100) | tostring) + "%) | " +
@@ -584,6 +626,7 @@ jobs:
             ${{ runner.temp }}/codemender-open.json
             ${{ runner.temp }}/codemender-stats.json
             ${{ runner.temp }}/codemender-telemetry.jsonl
+            ${{ runner.temp }}/cm-support-bundle.tar.gz
           retention-days: 30
 
       - name: Open Autonomous Remediation Pull Request
@@ -634,23 +677,34 @@ jobs:
             gh pr edit "$PR_URL" --repo "$GITHUB_REPOSITORY" --add-label "security,codemender" >/dev/null 2>&1 || true
           fi
 
-      - name: Evaluate Security Gate (Fail-Closed)
-        if: ${{ always() && env.ENFORCE_GATE == 'true' }}
+      - name: Evaluate Security Gate & Setup Health (Fail-Closed)
+        if: ${{ always() }}
         env:
           SCAN_EXIT_CODE: ${{ steps.scan.outputs.scan_exit_code || '1' }}
           TRIAGE_OUTCOME: ${{ steps.triage.outcome }}
           HIGH_CRITICAL_COUNT: ${{ steps.triage.outputs.high_critical || '0' }}
         run: |
           set -euo pipefail
-          if [ "$SCAN_EXIT_CODE" != "0" ] || [ "$TRIAGE_OUTCOME" != "success" ]; then
-            echo "::error title=Security Gate Failed (Fail-Closed)::CodeMender scan (exit=$SCAN_EXIT_CODE) or triage ($TRIAGE_OUTCOME) did not complete cleanly."
-            exit 1
+          # Always fail on CodeMender v0.17.0+ layered setup/auth/network exit codes (10/20/30/40/50),
+          # even when ENFORCE_GATE is false (e.g., scheduled monthly audits), to prevent silent false-green runs.
+          case "$SCAN_EXIT_CODE" in
+            10|20|30|40|50)
+              echo "::error title=CodeMender Setup/Auth Failure (Exit Code $SCAN_EXIT_CODE)::Pipeline failed due to credential, configuration, network, or IAM authorization error. Inspect the attached cm-support-bundle.tar.gz artifact."
+              exit 1
+              ;;
+          esac
+
+          if [ "$ENFORCE_GATE" = "true" ]; then
+            if [ "$SCAN_EXIT_CODE" != "0" ] || [ "$TRIAGE_OUTCOME" != "success" ]; then
+              echo "::error title=Security Gate Failed (Fail-Closed)::CodeMender scan (exit=$SCAN_EXIT_CODE) or triage ($TRIAGE_OUTCOME) did not complete cleanly."
+              exit 1
+            fi
+            if [ "$HIGH_CRITICAL_COUNT" -gt 0 ]; then
+              echo "::error title=Security Gate Blocked::CodeMender detected $HIGH_CRITICAL_COUNT open $FIX_SEVERITIES finding(s)."
+              exit 1
+            fi
+            echo "Security gate passed (0 open $FIX_SEVERITIES findings)."
           fi
-          if [ "$HIGH_CRITICAL_COUNT" -gt 0 ]; then
-            echo "::error title=Security Gate Blocked::CodeMender detected $HIGH_CRITICAL_COUNT open $FIX_SEVERITIES finding(s)."
-            exit 1
-          fi
-          echo "✅ Security gate passed (0 open $FIX_SEVERITIES findings)."
 
       - name: Shred Temporary WIF Credentials
         if: ${{ always() }}

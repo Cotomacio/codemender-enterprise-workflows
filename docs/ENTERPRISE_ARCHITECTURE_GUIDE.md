@@ -580,7 +580,7 @@ In the demo repositories (`team-a-payments` and `team-b-checkout`), caller workf
 # Recommended for Production Repositories:
 uses: Cotomacio/codemender-enterprise-workflows/.github/workflows/codemender-reusable.yml@v1.0.0
 ```
-Additionally, Platform teams can pass `cm_version` (e.g., `'0.16.6'`) and `cm_sha256` (`'<64-char-hex-digest>'`) so every runner cryptographically verifies the exact CodeMender CLI archive before extraction.
+Additionally, Platform teams can pass `cm_version` (e.g., `'0.17.0'`) and `cm_sha256` (`'<64-char-hex-digest>'`) so every runner cryptographically verifies the exact CodeMender CLI archive before extraction.
 
 ---
 
@@ -597,13 +597,16 @@ Enterprise organizations frequently require strict guarantees regarding source c
 
 ---
 
-### 3.3 Untrusted Code Execution Isolation & Ephemeral Runner Hardening
+### 3.3 Untrusted Code Execution Isolation, Ephemeral Runner Hardening & CodeMender `v0.17.0` Controls
 
-During `cm find` and `cm fix`, CodeMender may invoke build verification or test commands configured in the repository. To prevent untrusted code in a Pull Request from compromising credentials or persisting across runs:
+During `cm find` and `cm fix`, CodeMender may invoke build verification or test commands configured in the repository. To prevent untrusted code in a Pull Request from compromising credentials or persisting across runs, and to take full advantage of **CodeMender `v0.17.0+`** enterprise capabilities:
 1. **Ephemeral VM Isolation:** Each GitHub-hosted `ubuntu-24.04` job (or ephemeral GKE ARC pod with `gVisor` / Kata Containers isolation) runs in a single-use virtual environment destroyed immediately after the job completes.
-2. **Pre-Init Workspace Sanitization:** Before running `cm init`, the reusable workflow executes `rm -rf .cm_project .exploit ~/.codemender` ([Line 285](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L285)), ensuring a repository cannot pre-seed malicious `.cm_project` configurations.
-3. **Git Hook Bypass (`--no-verify`):** Atomic commits use `git commit --no-verify` ([Line 453](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L453)) so untrusted scripts inside `.git/hooks/` are never triggered.
-4. **Post-Run Credential Shredding:** The final workflow step (`Shred Temporary WIF Credentials`, `if: ${{ always() }}`, [Lines 649–658](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L649-L658)) deletes `$RUNNER_TEMP/gcp-creds.json` and `~/.config/gcloud/application_default_credentials.json`.
+2. **Pre-Init Workspace Sanitization:** Before running `cm init`, the reusable workflow executes `rm -rf .cm_project .exploit ~/.codemender` ([Line 298](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L298)), ensuring a repository cannot pre-seed malicious `.cm_project` configurations.
+3. **Git Hook Bypass (`--no-verify`) & Read-Only Policy Mounts (`v0.17.0`):** Atomic commits use `git commit --no-verify` ([Line 486](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L486)) so untrusted scripts inside `.git/hooks/` are never triggered, complementing CodeMender `v0.17.0`'s read-only protections on `.git/hooks`, `.git/config`, and `.codemender`.
+4. **Plain CI/CD Output Mode (`CM_PLAIN: 'true'`, `v0.17.0`):** Suppresses ANSI escape sequences, spinner animations, and Unicode box borders in GitHub Actions logs ([Line 168](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L168)).
+5. **Layered Setup/Auth Exit Code Fail-Fast (`10`/`20`/`30`/`40`/`50`) & Diagnostic Support Bundles (`v0.17.0`):** When `cm find` exits with a setup or authentication failure code (`10` Credentials, `20` Config, `30` Reachability/VPC-SC, `40` IAM Authorization, `50` Timeout), the workflow emits a targeted error annotation, packages a redacted diagnostic archive via `cm support-bundle --skip-health` ([Lines 344–367](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L344-L367)), attaches it to the workflow artifacts, and fails the job even when `enforce_gate: false` ([Lines 688–695](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L688-L695)).
+6. **Team & Model Attribution in FinOps Telemetry (`v0.17.0`):** Automatically sets `CM_TEAM_ID` (via `cm_team_id` input or short repository name) and enriches every `.jsonl` telemetry record with `team_id` and `cm_model` for BigQuery FinOps chargeback ([Lines 543–571](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L543-L571)).
+7. **Post-Run Credential Shredding:** The final workflow step (`Shred Temporary WIF Credentials`, `if: ${{ always() }}`, [Lines 709–712](https://github.com/Cotomacio/codemender-enterprise-workflows/blob/main/.github/workflows/codemender-reusable.yml#L709-L712)) deletes `$RUNNER_TEMP/gcp-creds.json` and `~/.config/gcloud/application_default_credentials.json`.
 
 ---
 

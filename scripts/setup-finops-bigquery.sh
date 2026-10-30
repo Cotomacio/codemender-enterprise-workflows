@@ -54,7 +54,7 @@ cat <<EOF
     - roles/storage.objectViewer on gs://${TELEMETRY_BUCKET}
 EOF
 
-if ! bq ls --project_id="${PROJECT_ID}" >/dev/null 2>&1; then
+if ! bq --project_id="${PROJECT_ID}" ls < /dev/null >/dev/null 2>&1; then
   echo "ERROR: Unable to access BigQuery on project '${PROJECT_ID}'." >&2
   echo "       Verify that your credentials are active ('gcloud auth login') and that your" >&2
   echo "       principal holds roles/bigquery.jobUser and roles/bigquery.dataEditor on '${PROJECT_ID}'." >&2
@@ -82,6 +82,8 @@ CREATE OR REPLACE EXTERNAL TABLE \`${PROJECT_ID}.${BQ_DATASET}.scan_telemetry\` 
   repository STRING OPTIONS(description="Full GitHub repository identifier in 'owner/repo' format (e.g., 'Cotomacio/team-a-payments')."),
   repository_owner STRING OPTIONS(description="GitHub Organization or user owner name."),
   repository_name STRING OPTIONS(description="Short GitHub repository name without owner prefix (e.g., 'team-a-payments')."),
+  team_id STRING OPTIONS(description="CodeMender v0.17.0+ customer team identifier ($CM_TEAM_ID) for FinOps chargeback attribution (defaults to repository_name)."),
+  cm_model STRING OPTIONS(description="CodeMender v0.17.0+ Gemini Enterprise model identifier used for the scan (e.g., 'gemini-3.8-flash')."),
   scan_mode STRING OPTIONS(description="CodeMender scan mode: 'deep' (full repository audit), 'diff' (PR delta + 1-hop callers), or 'quick'."),
   scan_path STRING OPTIONS(description="Relative directory path scanned within the repository (default '.')."),
   github_run_id INT64 OPTIONS(description="Unique GitHub Actions workflow run ID (primary key per execution)."),
@@ -110,6 +112,8 @@ CREATE OR REPLACE EXTERNAL TABLE \`${PROJECT_ID}.${BQ_DATASET}.scan_telemetry\` 
     label STRING OPTIONS(description="CLI command bucket label (e.g., 'find --deep', 'find --diff', 'fix', or 'total'). IMPORTANT: Always filter WHERE label != 'total' when unnesting buckets to avoid 2x double-counting."),
     requests INT64 OPTIONS(description="Number of CLI command invocations in this bucket (e.g., 1 for 'find --deep', or N for 'fix' where N findings were patched)."),
     polls INT64 OPTIONS(description="Polling count for this command bucket."),
+    team_id STRING OPTIONS(description="CodeMender v0.17.0+ customer team identifier for this command bucket."),
+    model STRING OPTIONS(description="CodeMender v0.17.0+ Gemini Enterprise model used for this command bucket."),
     input_tokens INT64 OPTIONS(description="Total input tokens for this command bucket (includes cached_tokens)."),
     output_tokens INT64 OPTIONS(description="Generated output tokens for this command bucket."),
     cached_tokens INT64 OPTIONS(description="Subset of input_tokens served from Context Cache for this command bucket."),
