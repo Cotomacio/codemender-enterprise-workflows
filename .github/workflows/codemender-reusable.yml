@@ -92,6 +92,11 @@ on:
         required: false
         default: ''
         type: string
+      cm_task_agent_id:
+        description: 'Optional CodeMender Agent ID ($CM_TASK_AGENT_ID) for Task API service account execution and v0.18.0+ health/IAM checks'
+        required: false
+        default: ''
+        type: string
       enable_autofix:
         description: 'Run cm fix on open findings and open an automated remediation Pull Request'
         required: false
@@ -167,6 +172,7 @@ jobs:
       CM_LOCATION: ${{ inputs.cm_location }}
       CM_PLAIN: 'true'
       CM_TEAM_ID_INPUT: ${{ inputs.cm_team_id }}
+      CM_TASK_AGENT_ID_INPUT: ${{ inputs.cm_task_agent_id }}
       SCAN_PATH: ${{ inputs.scan_path }}
       SCAN_MODE: ${{ inputs.scan_mode }}
       CM_MODEL: ${{ inputs.cm_model }}
@@ -231,6 +237,13 @@ jobs:
             exit 1
           fi
           echo "CM_TEAM_ID=$RESOLVED_TEAM_ID" >> "$GITHUB_ENV"
+          if [ -n "${CM_TASK_AGENT_ID_INPUT:-}" ]; then
+            if [[ ! "$CM_TASK_AGENT_ID_INPUT" =~ ^[A-Za-z0-9./_-]+$ ]]; then
+              echo "::error title=Invalid Agent ID::cm_task_agent_id contains invalid characters."
+              exit 1
+            fi
+            echo "CM_TASK_AGENT_ID=$CM_TASK_AGENT_ID_INPUT" >> "$GITHUB_ENV"
+          fi
 
       - name: Apply Deterministic Cron Jitter (Scheduled Runs Only)
         if: ${{ github.event_name == 'schedule' && inputs.schedule_jitter_max_seconds != '0' }}
@@ -353,7 +366,7 @@ jobs:
                 echo "::error title=CodeMender Reachability Failure (Exit Code 30)::Endpoint unreachable (check DNS, TLS, or VPC Service Controls perimeter)."
                 ;;
               40)
-                echo "::error title=CodeMender Authorization Failure (Exit Code 40)::Service Account lacks IAM permissions to access the configured Gemini Enterprise / CodeMender project or agent."
+                echo "::error title=CodeMender Authorization Failure (Exit Code 40)::Service Account lacks IAM permissions (grant roles/aiplatform.agentsUser and roles/aiplatform.user) to access the configured Gemini Enterprise / CodeMender project or agent."
                 ;;
               50)
                 echo "::error title=CodeMender Timeout (Exit Code 50)::CodeMender probe or session timed out."

@@ -10,7 +10,8 @@
 #   1. Enables Gemini Enterprise (`aiplatform.googleapis.com` for backward-compatible
 #      SDK endpoints), IAM Credentials, STS, and Cloud Storage APIs.
 #   2. Creates the dedicated `codemender-ci` Service Account.
-#   3. Grants `roles/aiplatform.user` and `roles/serviceusage.serviceUsageConsumer`.
+#   3. Grants `roles/aiplatform.user`, `roles/aiplatform.agentsUser` (CodeMender
+#      v0.18.0+ Agent/Task API role), and `roles/serviceusage.serviceUsageConsumer`.
 #   4. Creates a hardened GCS Bucket (`--uniform-bucket-level-access`,
 #      `--public-access-prevention`, configurable WORM `--retention-period`,
 #      optional Cloud KMS CMEK) and grants ONLY `roles/storage.objectCreator`
@@ -71,7 +72,7 @@ cat <<EOF
     - roles/storage.admin
 EOF
 
-if ! gcloud projects describe "${PROJECT_ID}" >/dev/null 2>&1; then
+if ! gcloud projects describe "${PROJECT_ID}" < /dev/null >/dev/null 2>&1; then
   echo "ERROR: Unable to access project '${PROJECT_ID}' as '${ACTIVE_ACCOUNT}'." >&2
   echo "       Verify that '${PROJECT_ID}' exists, your gcloud session is fresh ('gcloud auth login')," >&2
   echo "       and '${ACTIVE_ACCOUNT}' holds the required IAM roles listed above." >&2
@@ -98,7 +99,7 @@ if ! gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJECT_ID}
     --display-name="CodeMender Enterprise CI/CD Runner"
 fi
 
-echo "==> [3/6] Granting Gemini Enterprise (roles/aiplatform.user) & Service Usage roles to ${SA_EMAIL}..."
+echo "==> [3/6] Granting Gemini Enterprise (roles/aiplatform.user, roles/aiplatform.agentsUser) & Service Usage roles to ${SA_EMAIL}..."
 for ROLE in "roles/aiplatform.user" "roles/serviceusage.serviceUsageConsumer"; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${SA_EMAIL}" \
@@ -106,6 +107,12 @@ for ROLE in "roles/aiplatform.user" "roles/serviceusage.serviceUsageConsumer"; d
     --condition=None \
     --quiet >/dev/null
 done
+# Grant roles/aiplatform.agentsUser (CodeMender v0.18.0+ Agent/Task API role for CI/CD service accounts)
+gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/aiplatform.agentsUser" \
+  --condition=None \
+  --quiet >/dev/null 2>&1 || echo "  Note: roles/aiplatform.agentsUser not yet available in ${PROJECT_ID}; continuing with roles/aiplatform.user."
 
 echo "==> [4/6] Creating & Hardening Append-Only GCS Telemetry Bucket gs://${TELEMETRY_BUCKET}..."
 if ! gcloud storage buckets describe "gs://${TELEMETRY_BUCKET}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
