@@ -78,9 +78,14 @@ on:
         default: 'global'
         type: string
       cm_model:
-        description: 'Optional Gemini model override (leave empty for CLI default)'
+        description: 'Optional Gemini model override (e.g., gemini-3.8-flash, gemini-4-hydrogen, gemini-4-carbon; leave empty for CLI default)'
         required: false
         default: ''
+        type: string
+      cm_duration:
+        description: 'Maximum wall-clock execution duration per CodeMender command ($CM_DURATION, e.g., 60m, 45m, or 0 for unlimited; v0.22.0+)'
+        required: false
+        default: '60m'
         type: string
       cm_context:
         description: 'Optional architectural/threat-model context passed to cm find (-c)'
@@ -171,6 +176,9 @@ jobs:
       GOOGLE_CLOUD_PROJECT: ${{ inputs.gcp_project_id }}
       CM_LOCATION: ${{ inputs.cm_location }}
       CM_PLAIN: 'true'
+      CM_IGNORE_PROJECT_CONFIG: 'true'
+      CM_STALL_DETECTION: 'on'
+      CM_DURATION_INPUT: ${{ inputs.cm_duration }}
       CM_TEAM_ID_INPUT: ${{ inputs.cm_team_id }}
       CM_TASK_AGENT_ID_INPUT: ${{ inputs.cm_task_agent_id }}
       SCAN_PATH: ${{ inputs.scan_path }}
@@ -243,6 +251,13 @@ jobs:
               exit 1
             fi
             echo "CM_TASK_AGENT_ID=$CM_TASK_AGENT_ID_INPUT" >> "$GITHUB_ENV"
+          fi
+          if [ -n "${CM_DURATION_INPUT:-}" ] && [ "${CM_DURATION_INPUT}" != "0" ]; then
+            if [[ ! "$CM_DURATION_INPUT" =~ ^[0-9]+(s|m|h)$ ]]; then
+              echo "::error title=Invalid Duration::cm_duration must be 0 or a duration string such as 45m, 60m, or 1h."
+              exit 1
+            fi
+            echo "CM_DURATION=$CM_DURATION_INPUT" >> "$GITHUB_ENV"
           fi
 
       - name: Apply Deterministic Cron Jitter (Scheduled Runs Only)
@@ -339,7 +354,7 @@ jobs:
           fi
 
           if [ -n "$CM_MODEL" ]; then
-            CMD_ARGS+=("--model=$CM_MODEL")
+            CMD_ARGS+=("--model=$CM_MODEL" "--force-model")
           fi
           if [ -n "$CM_CONTEXT" ]; then
             CMD_ARGS+=("-c" "$CM_CONTEXT")
@@ -352,10 +367,13 @@ jobs:
           set -e
           echo "scan_exit_code=$SCAN_RC" >> "$GITHUB_OUTPUT"
 
-          # Handle CodeMender v0.17.0+ layered setup/transport exit codes (10/20/30/40/50)
+          # Handle CodeMender v0.22.0+ / v0.23.0+ exit codes (2/10/20/30/40/50)
           # and collect a redacted diagnostic support bundle on any non-zero exit.
           if [ "$SCAN_RC" -ne 0 ]; then
             case "$SCAN_RC" in
+              2)
+                echo "::error title=CodeMender General or Prompt-Injection Failure (Exit Code 2)::Scan failed or was halted by the prompt injection safety filter."
+                ;;
               10)
                 echo "::error title=CodeMender Credential Failure (Exit Code 10)::Invalid or missing OAuth / WIF / Service Account credentials."
                 ;;
@@ -369,7 +387,7 @@ jobs:
                 echo "::error title=CodeMender Authorization Failure (Exit Code 40)::Service Account lacks IAM permissions (grant roles/aiplatform.agentsUser and roles/aiplatform.user) to access the configured Gemini Enterprise / CodeMender project or agent."
                 ;;
               50)
-                echo "::error title=CodeMender Timeout (Exit Code 50)::CodeMender probe or session timed out."
+                echo "::warning title=CodeMender Execution Duration Limit Reached (Exit Code 50)::Scan reached its configured --duration ($CM_DURATION_INPUT) or health timeout; partial findings discovered so far have been preserved."
                 ;;
               *)
                 echo "::warning title=CodeMender Scan Non-Zero Exit::cm find exited with status $SCAN_RC. Check logs for API quota or connectivity issues."
@@ -484,6 +502,11 @@ jobs:
           FIXED_COUNT=0
           FIXED_LIST=""
 
+          FIX_MODEL_ARGS=()
+          if [ -n "$CM_MODEL" ]; then
+            FIX_MODEL_ARGS+=("--model=$CM_MODEL" "--force-model")
+          fi
+
           while IFS=$'\t' read -r FID FSEV FTITLE; do
             [ -z "$FID" ] && continue
             if [[ ! "$FID" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
@@ -493,7 +516,7 @@ jobs:
             echo "================================================================="
             echo "Attempting autonomous remediation for [$FSEV] $FID: $FTITLE"
             echo "================================================================="
-            if cm fix "$FID" --sandbox=false --yes --bypass-warning < /dev/null; then
+            if cm fix "$FID" "${FIX_MODEL_ARGS[@]}" --sandbox=false --yes --bypass-warning < /dev/null; then
               # Ensure temporary artifacts are never staged
               git reset HEAD -- .cm_project .exploit 2>/dev/null || true
               rm -rf .exploit 2>/dev/null || true
@@ -698,11 +721,14 @@ jobs:
           HIGH_CRITICAL_COUNT: ${{ steps.triage.outputs.high_critical || '0' }}
         run: |
           set -euo pipefail
-          # Always fail on CodeMender v0.17.0+ layered setup/auth/network exit codes (10/20/30/40/50),
-          # even when ENFORCE_GATE is false (e.g., scheduled monthly audits), to prevent silent false-green runs.
+          # Always fail on CodeMender v0.22.0+ general/prompt-injection failure (2) and
+          # v0.17.0+ layered setup/auth/network exit codes (10/20/30/40), even when
+          # ENFORCE_GATE is false (e.g., scheduled monthly audits), to prevent silent false-green runs.
+          # Note: Exit code 50 in v0.22.0+ indicates --duration budget reached with partial findings preserved;
+          # when ENFORCE_GATE=true (PR gates), exit code 50 still fails closed below.
           case "$SCAN_EXIT_CODE" in
-            10|20|30|40|50)
-              echo "::error title=CodeMender Setup/Auth Failure (Exit Code $SCAN_EXIT_CODE)::Pipeline failed due to credential, configuration, network, or IAM authorization error. Inspect the attached cm-support-bundle.tar.gz artifact."
+            2|10|20|30|40)
+              echo "::error title=CodeMender Execution or Setup Failure (Exit Code $SCAN_EXIT_CODE)::Pipeline failed due to general/prompt-injection error (2) or credential/config/network/IAM error (10-40). Inspect the attached cm-support-bundle.tar.gz artifact."
               exit 1
               ;;
           esac

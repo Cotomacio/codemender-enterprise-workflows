@@ -83,7 +83,7 @@ CREATE OR REPLACE EXTERNAL TABLE \`${PROJECT_ID}.${BQ_DATASET}.scan_telemetry\` 
   repository_owner STRING OPTIONS(description="GitHub Organization or user owner name."),
   repository_name STRING OPTIONS(description="Short GitHub repository name without owner prefix (e.g., 'team-a-payments')."),
   team_id STRING OPTIONS(description="CodeMender v0.17.0+ customer team identifier ($CM_TEAM_ID) for FinOps chargeback attribution (defaults to repository_name)."),
-  cm_model STRING OPTIONS(description="CodeMender v0.17.0+ Gemini Enterprise model identifier used for the scan (e.g., 'gemini-3.8-flash')."),
+  cm_model STRING OPTIONS(description="CodeMender v0.17.0+ / v0.23.0+ Gemini Enterprise model identifier used for the scan (e.g., 'gemini-3.8-flash' default, 'gemini-4-hydrogen', 'gemini-4-carbon', 'gemini-4-argon')."),
   scan_mode STRING OPTIONS(description="CodeMender scan mode: 'deep' (full repository audit), 'diff' (PR delta + 1-hop callers), or 'quick'."),
   scan_path STRING OPTIONS(description="Relative directory path scanned within the repository (default '.')."),
   github_run_id INT64 OPTIONS(description="Unique GitHub Actions workflow run ID (primary key per execution)."),
